@@ -259,6 +259,18 @@ XRAY_CFG_DIR_PATH="${VPSMGR_XRAY_CFG_DIR:-/usr/local/etc/xray}"
 
 ensure_xray_service() {
   mkdir -p "$XRAY_LOG_DIR_PATH" "$XRAY_CFG_DIR_PATH" "$XRAY_DROPIN_DIR" 2>/dev/null || true
+  # The log files must exist AND be writable by the service user before the
+  # first start: Xray opens access.log at startup and exits at once with
+  # "permission denied" when it cannot (seen live 2026-11-07 - the service
+  # ran as User=nobody against a root-owned log dir). Create both logs and
+  # hand them to nobody when that user exists; also open the permissions so
+  # either service identity (root or nobody) can always write.
+  touch "$XRAY_LOG_DIR_PATH/access.log" "$XRAY_LOG_DIR_PATH/error.log" 2>/dev/null || true
+  if id nobody >/dev/null 2>&1; then
+    chown -R nobody:nogroup "$XRAY_LOG_DIR_PATH" 2>/dev/null || chown -R nobody "$XRAY_LOG_DIR_PATH" 2>/dev/null || true
+  fi
+  chmod 777 "$XRAY_LOG_DIR_PATH" 2>/dev/null || true
+  chmod 666 "$XRAY_LOG_DIR_PATH/access.log" "$XRAY_LOG_DIR_PATH/error.log" 2>/dev/null || true
   local want=""
   want="$(cat <<'EOF'
 # VPS Manager Suite: run the Xray service as root.
