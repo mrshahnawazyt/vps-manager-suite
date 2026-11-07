@@ -98,6 +98,20 @@ dns_check() {
 # HTTP-01 needs port 80 free, so nginx/haproxy are stopped before certbot runs
 # and started again afterwards. (The old --http-01-port 8899 approach never
 # worked - ACME always arrives on port 80.)
+
+# HAProxy terminates TLS on port 443, and HAProxy loads its certificate
+# as ONE bundle file (cert + key). Rebuild that bundle from the suite
+# cert pair whenever the pair is (re)issued, so HAProxy never serves a
+# stale certificate after an install or a renewal.
+build_haproxy_pem() {
+  if [[ -s "$CONFIG_DIR/ssl/fullchain.pem" && -s "$CONFIG_DIR/ssl/privkey.pem" ]]; then
+    cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/haproxy.pem" 2>/dev/null || return 1
+    chmod 600 "$CONFIG_DIR/ssl/haproxy.pem" 2>/dev/null || true
+    return 0
+  fi
+  return 1
+}
+
 issue_ssl() {
   local domain="$1" force="${2:-}" le_dir="/etc/letsencrypt/live/$1"
   ensure_dirs; mkdir -p "$CONFIG_DIR/ssl"
@@ -138,6 +152,7 @@ issue_ssl() {
   if [[ -s "$CONFIG_DIR/ssl/fullchain.pem" && -s "$CONFIG_DIR/ssl/privkey.pem" ]]; then
     chmod 600 "$CONFIG_DIR/ssl/privkey.pem" 2>/dev/null || true
     cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
+    build_haproxy_pem || true
     ok "SSL ready ($got)"
     echo "Cert: $CONFIG_DIR/ssl/fullchain.pem"
   else
@@ -176,7 +191,7 @@ ssl_cert_summary() {
 
 reapply_cert() {
   # Copy the Let's Encrypt cert for the current domain into the suite ssl
-  # dir and restart every service that loads it (HAProxy combined file,
+  # dir and restart every service that loads it (HAProxy TLS bundle,
   # Xray direct-TLS inbounds, the panel). Used after a renewal that
   # happened outside the suite (e.g. a manual certbot run).
   local domain le_dir
@@ -189,9 +204,11 @@ reapply_cert() {
     cp "$le_dir/privkey.pem" "$CONFIG_DIR/ssl/privkey.pem" || true
     chmod 600 "$CONFIG_DIR/ssl/privkey.pem" 2>/dev/null || true
     cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
+    build_haproxy_pem || true
     ok "Certificate for $domain re-applied from Let's Encrypt"
   elif [[ -s "$CONFIG_DIR/ssl/fullchain.pem" ]]; then
     cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
+    build_haproxy_pem || true
     warn "No Let's Encrypt cert found for '$domain' - kept the existing suite certificate"
   else
     err "No certificate found to re-apply (domain: '$domain')"
@@ -235,6 +252,10 @@ cp "$RENEWED_LINEAGE/fullchain.pem" "$SSL_DIR/fullchain.pem" || true
 cp "$RENEWED_LINEAGE/privkey.pem" "$SSL_DIR/privkey.pem" || true
 chmod 600 "$SSL_DIR/privkey.pem" 2>/dev/null || true
 cat "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" > "$SSL_DIR/combined.pem" 2>/dev/null || true
+# HAProxy terminates TLS on 443 from a single bundle file - rebuild it too,
+# then the restart below makes HAProxy serve the fresh certificate.
+cat "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" > "$SSL_DIR/haproxy.pem" 2>/dev/null || true
+chmod 600 "$SSL_DIR/haproxy.pem" 2>/dev/null || true
 for s in haproxy xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
 exit 0
 HOOK
