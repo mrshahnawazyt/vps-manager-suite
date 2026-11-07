@@ -54,6 +54,12 @@ ensure_xray_certs(){
 info "Starting the stack fix... (Nginx, HAProxy, Xray, Dropbear, ws-proxy)"
 ensure_xray_certs || true
 mkdir -p /var/log/xray 2>/dev/null || true
+# The stock Xray unit runs as User=nobody, which cannot read the TLS
+# private key (mode 600) or write the access log - install the drop-in
+# that runs the service as root BEFORE restarting it below.
+if declare -F ensure_xray_service >/dev/null 2>&1; then
+  ensure_xray_service || warn "The Xray service drop-in could not be installed - Xray may still fail to start."
+fi
 for cfg in "nginx -t" "haproxy -c -f /etc/haproxy/haproxy.cfg"; do
   echo "Check: $cfg"; eval "$cfg" 2>&1 | head -n 20 || warn "$cfg check failed / binary not found"
 done
@@ -96,10 +102,15 @@ done
 _xray_state="$(svc_state xray)"
 if [[ "$_xray_state" == "failed" || "$_xray_state" == "inactive" ]] && command -v journalctl >/dev/null 2>&1; then
   box_line "Xray is not running - last log lines:"
-  journalctl -u xray -n 3 --no-pager -o cat 2>/dev/null | while IFS= read -r _l; do
+  journalctl -u xray -n 5 --no-pager -o cat 2>/dev/null | while IFS= read -r _l; do
     [[ -n "$_l" ]] && box_line "${_l:0:42}"
   done
 fi
 echo "$BOX_EDGE"
+# Journal lines inside the box are truncated to fit - when Xray is down,
+# repeat the failure with the full log lines outside the box as well.
+if [[ "$_xray_state" == "failed" || "$_xray_state" == "inactive" ]] && declare -F verify_xray_running >/dev/null 2>&1; then
+  verify_xray_running || true
+fi
 ok "Fix attempt complete. If a service is still down, its log has the exact reason: journalctl -u <service> -n 50"
 log_activity "fix-stack executed"
