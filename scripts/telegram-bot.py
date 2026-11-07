@@ -167,14 +167,14 @@ def home_kb(role):
 # ---------------------------------------------------------------------------
 def sh(cmd, timeout=30):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=timeout)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except Exception as e:
         return 1, str(e)
 
 
 def svc_state(name):
-    r = subprocess.run(["systemctl", "is-active", name], capture_output=True, text=True)
+    r = subprocess.run(["systemctl", "is-active", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     return (r.stdout or "").strip() or "unknown"
 
 
@@ -190,7 +190,7 @@ def sys_create(u, pw, exp_date):
         hashed = crypt.crypt(pw, crypt.mksalt(crypt.METHOD_SHA512))
         sh(["usermod", "-p", hashed, u], 15)
     except Exception:
-        p = subprocess.Popen(["chpasswd"], stdin=subprocess.PIPE, text=True)
+        p = subprocess.Popen(["chpasswd"], stdin=subprocess.PIPE, universal_newlines=True)
         p.communicate("%s:%s" % (u, pw), timeout=15)
     return ""
 
@@ -220,7 +220,7 @@ def sys_expiry(u, exp_date):
 def sync():
     try:
         subprocess.run([sys.executable, os.path.join(BASE, "scripts", "sync-xray.py"), "--restart"],
-                       capture_output=True, timeout=120)
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
     except Exception as e:
         print("[bot] xray sync failed: %s" % e, flush=True)
 
@@ -229,7 +229,7 @@ def run_long(chat, argv, label, timeout=600):
     """Run a long stack action in the background, report the tail."""
     def work():
         try:
-            r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=timeout)
             tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()
             send(chat, "✅ <b>%s</b> finished (exit %d):\n<pre>%s</pre>" % (
                 label, r.returncode, "\n".join(tail[-12:]) or "no output"))

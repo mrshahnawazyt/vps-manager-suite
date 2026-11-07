@@ -92,9 +92,20 @@ qos_apply(){
   remove_marks
   rm -f "$CAPS_FILE"
   if [[ "$cap" -eq 0 ]]; then
-    tc qdisc add dev "$iface" root cake bandwidth "$rate" diffserv4 dual-dsthost nat wash ack-filter split-gso rtt 100ms 2>/dev/null \
-      || tc qdisc add dev "$iface" root cake bandwidth "$rate"
-    echo "[OK] CAKE is active (no per-user caps). Test the ping: ping -c 10 1.1.1.1"
+    if tc qdisc add dev "$iface" root cake bandwidth "$rate" diffserv4 dual-dsthost nat wash ack-filter split-gso rtt 100ms 2>/dev/null \
+       || tc qdisc add dev "$iface" root cake bandwidth "$rate" 2>/dev/null; then
+      echo "[OK] CAKE is active (no per-user caps). Test the ping: ping -c 10 1.1.1.1"
+    elif tc qdisc add dev "$iface" root fq_codel 2>/dev/null; then
+      echo "[WARN] CAKE could not be applied on this system, so fq_codel"
+      echo "[WARN] was enabled instead (it still controls bufferbloat)."
+      echo "[WARN] CAKE (sch_cake) needs kernel 4.16 or newer. Ubuntu 18.04's"
+      echo "[WARN] stock 4.15 kernel does not include it - install the HWE"
+      echo "[WARN] kernel (linux-generic-hwe-18.04), reboot, and re-run"
+      echo "[WARN] this option to switch to CAKE."
+    else
+      echo "[X] Could not apply any queueing discipline on $iface - check that iproute2 (tc) is installed and the interface exists."
+      return 1
+    fi
     tc qdisc show dev "$iface" | head -n 3
     return 0
   fi
@@ -115,8 +126,10 @@ PY
   tc qdisc add dev "$iface" root handle 1: htb default 10 || { echo "[X] Could not create the HTB root (tc/htb unavailable?)"; return 1; }
   tc class add dev "$iface" parent 1: classid 1:1 htb rate "${total}mbit" ceil "${total}mbit"
   tc class add dev "$iface" parent 1:1 classid 1:10 htb rate "${defrate}mbit" ceil "${total}mbit"
-  tc qdisc add dev "$iface" parent 1:10 handle 110: cake bandwidth "${defrate}mbit" diffserv4 dual-dsthost nat wash 2>/dev/null \
-    || tc qdisc add dev "$iface" parent 1:10 handle 110: fq_codel 2>/dev/null || true
+  if ! tc qdisc add dev "$iface" parent 1:10 handle 110: cake bandwidth "${defrate}mbit" diffserv4 dual-dsthost nat wash 2>/dev/null; then
+    tc qdisc add dev "$iface" parent 1:10 handle 110: fq_codel 2>/dev/null || true
+    echo "[QoS] Note: CAKE leaf unavailable (needs kernel 4.16+) - fq_codel used for the default class."
+  fi
   tc filter add dev "$iface" parent 1: protocol ip handle 10 fw flowid 1:10 2>/dev/null || true
   python3 - "$CAPS_FILE" <<'PY' > /dev/null
 import json, sys

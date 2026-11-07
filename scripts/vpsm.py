@@ -58,9 +58,34 @@ def today():
 
 def parse_date(s):
     try:
-        return datetime.date.fromisoformat(str(s)[:10])
+        # strptime instead of date.fromisoformat (Python 3.7+) so this
+        # also runs on Python 3.6 (Ubuntu 18.04)
+        return datetime.datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
     except Exception:
         return None
+
+def _dt_from_iso(s):
+    """datetime.fromisoformat() equivalent that also works on Python 3.6.
+
+    Parses the ISO strings this suite writes (YYYY-MM-DD, optionally with
+    a time and a +/-HH:MM offset). Raises ValueError on bad input, like
+    fromisoformat does.
+    """
+    s = str(s).strip()
+    m = re.search(r"([+-])(\d{2}):(\d{2})(?::(\d{2}))?$", s)
+    if m:  # strptime %z cannot parse a colon in the offset before 3.7
+        s = s[:m.start()] + m.group(1) + m.group(2) + m.group(3) + (m.group(4) or "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M%z", "%Y-%m-%d %H:%M:%S.%f%z",
+                "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M%z",
+                "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError("Invalid isoformat string: %r" % (s,))
 
 
 def expires_on(created, days):
@@ -116,7 +141,7 @@ def dead_note(rec, grace_hours, now=None):
     if not at:
         return ""
     try:
-        start = datetime.datetime.fromisoformat(str(at))
+        start = _dt_from_iso(at)
     except Exception:
         return ""
     now = now or datetime.datetime.now()

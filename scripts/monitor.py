@@ -55,6 +55,29 @@ def now():
 def today():
     return datetime.date.today()
 
+def _dt_from_iso(s):
+    """datetime.fromisoformat() equivalent that also works on Python 3.6.
+
+    Parses the ISO strings this suite writes (YYYY-MM-DD, optionally with
+    a time and a +/-HH:MM offset). Raises ValueError on bad input, like
+    fromisoformat does.
+    """
+    s = str(s).strip()
+    m = re.search(r"([+-])(\d{2}):(\d{2})(?::(\d{2}))?$", s)
+    if m:  # strptime %z cannot parse a colon in the offset before 3.7
+        s = s[:m.start()] + m.group(1) + m.group(2) + m.group(3) + (m.group(4) or "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M%z", "%Y-%m-%d %H:%M:%S.%f%z",
+                "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M%z",
+                "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError("Invalid isoformat string: %r" % (s,))
+
 
 def load(name, default):
     p = os.path.join(DATA_DIR, name)
@@ -91,7 +114,7 @@ def to_float(v, d=0.0):
 
 def run(cmd, timeout=15):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=timeout)
     except Exception:
         return None
 
@@ -103,7 +126,7 @@ def cfg():
 
 def is_expired(rec):
     try:
-        base = datetime.date.fromisoformat(str(rec.get("created", ""))[:10])
+        base = datetime.datetime.strptime(str(rec.get("created", ""))[:10], "%Y-%m-%d").date()  # 3.6-safe (no fromisoformat)
         return today() > base + datetime.timedelta(days=to_int(rec.get("expiry_days", 30), 30))
     except Exception:
         return False
@@ -442,7 +465,7 @@ def ip_block_active(rec):
     if not until:
         return False
     try:
-        return now() < datetime.datetime.fromisoformat(str(until))
+        return now() < _dt_from_iso(until)
     except Exception:
         return False
 
@@ -524,7 +547,7 @@ def run_pass(log=print):
             # auto-delete after the grace period
             if grace > 0 and u.get("disabled_at"):
                 try:
-                    at = datetime.datetime.fromisoformat(str(u["disabled_at"]))
+                    at = _dt_from_iso(u["disabled_at"])
                     if now() - at > datetime.timedelta(hours=grace):
                         delete_ssh_system(who)
                         log("[SSH] %s: AUTO-DELETED (disabled > %dh)" % (who, grace))
@@ -571,7 +594,7 @@ def run_pass(log=print):
         if u.get("disabled") is True:
             if grace > 0 and u.get("disabled_at"):
                 try:
-                    at = datetime.datetime.fromisoformat(str(u["disabled_at"]))
+                    at = _dt_from_iso(u["disabled_at"])
                     if now() - at > datetime.timedelta(hours=grace):
                         need_sync = True
                         log("[Xray] %s: AUTO-DELETED (disabled > %dh)" % (who, grace))

@@ -60,9 +60,33 @@ def bootstrap_uuid():
         except Exception: pass
     return d["uuid"]
 
+def _dt_from_iso(s):
+    """datetime.fromisoformat() equivalent that also works on Python 3.6.
+
+    Parses the ISO strings this suite writes (YYYY-MM-DD, optionally with
+    a time and a +/-HH:MM offset). Raises ValueError on bad input, like
+    fromisoformat does.
+    """
+    s = str(s).strip()
+    m = re.search(r"([+-])(\d{2}):(\d{2})(?::(\d{2}))?$", s)
+    if m:  # strptime %z cannot parse a colon in the offset before 3.7
+        s = s[:m.start()] + m.group(1) + m.group(2) + m.group(3) + (m.group(4) or "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M%z", "%Y-%m-%d %H:%M:%S.%f%z",
+                "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M%z",
+                "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError("Invalid isoformat string: %r" % (s,))
+
+
 def is_expired(acct):
     try:
-        base = datetime.date.fromisoformat(str(acct.get("created", ""))[:10])
+        base = datetime.datetime.strptime(str(acct.get("created", ""))[:10], "%Y-%m-%d").date()  # 3.6-safe (no fromisoformat)
         return datetime.date.today() > base + datetime.timedelta(days=int(acct.get("expiry_days", 30)))
     except Exception:
         return False
@@ -79,7 +103,7 @@ def ip_block_active(acct):
     if not until:
         return False
     try:
-        return datetime.datetime.now() < datetime.datetime.fromisoformat(str(until))
+        return datetime.datetime.now() < _dt_from_iso(until)
     except Exception:
         return False
 
@@ -114,7 +138,7 @@ def ensure_certs(cfg):
             os.makedirs(os.path.dirname(cf) or ".", exist_ok=True)
             r = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048",
                                 "-keyout", kf, "-out", cf, "-days", "365", "-nodes",
-                                "-subj", f"/CN={dom}"], capture_output=True, text=True)
+                                "-subj", f"/CN={dom}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             if r.returncode == 0 and os.path.exists(cf) and os.path.exists(kf):
                 try: os.chmod(kf, 0o600)
                 except Exception: pass
@@ -155,7 +179,7 @@ def api_user_sync(xray, cfg):
     without restarting Xray. Returns True only if every change applied."""
     server = os.environ.get("VPSMGR_XRAY_STATS", "127.0.0.1:10085")
     try:
-        h = subprocess.run([xray, "api", "--help"], capture_output=True, text=True, timeout=10)
+        h = subprocess.run([xray, "api", "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10)
         helptext = (h.stdout or "") + (h.stderr or "")
     except Exception:
         return False
@@ -179,7 +203,7 @@ def api_user_sync(xray, cfg):
         for op, tag, em, client in changes:
             if op == "rmu":
                 r = subprocess.run([xray, "api", "rmu", "-server=" + server, "-tag", tag, em],
-                                   capture_output=True, text=True, timeout=15)
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=15)
             else:
                 if tmpd is None:
                     import tempfile
@@ -188,7 +212,7 @@ def api_user_sync(xray, cfg):
                 with open(fp, "w") as f:
                     json.dump(client, f)
                 r = subprocess.run([xray, "api", "adu", "-server=" + server, "-tag", tag, fp],
-                                   capture_output=True, text=True, timeout=15)
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=15)
             if r.returncode != 0:
                 print("sync-xray: live API %s failed for %s/%s - falling back to restart" % (op, tag, em))
                 return False
@@ -268,7 +292,7 @@ def main():
     xray = subprocess.getoutput("command -v xray").strip()
     rc = 0
     if xray:
-        r = subprocess.run([xray, "run", "-test", "-config", OUT], capture_output=True, text=True)
+        r = subprocess.run([xray, "run", "-test", "-config", OUT], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         if r.returncode != 0:
             print("sync-xray: WARNING xray config test FAIL:\n" + (r.stderr or r.stdout)[-800:])
             # Fall back to the template-only seed config (no user accounts) so
@@ -276,7 +300,7 @@ def main():
             # on the next sync run once the cause above is fixed.
             with open(OUT, "w") as f: json.dump(seed_cfg, f, indent=2)
             print("sync-xray: fell back to the seed config (template only, no user accounts)")
-            r2 = subprocess.run([xray, "run", "-test", "-config", OUT], capture_output=True, text=True)
+            r2 = subprocess.run([xray, "run", "-test", "-config", OUT], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             if r2.returncode != 0:
                 print("sync-xray: ERROR even the seed config fails the test:\n" + (r2.stderr or r2.stdout)[-800:])
             else:
@@ -289,11 +313,11 @@ def main():
         applied = cfg if rc == 0 else seed_cfg
         live = False
         if rc == 0 and xray and state.get("skeleton") == skeleton_hash(cfg):
-            act = subprocess.run(["systemctl", "is-active", "--quiet", "xray"], capture_output=True)
+            act = subprocess.run(["systemctl", "is-active", "--quiet", "xray"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if act.returncode == 0:
                 live = api_user_sync(xray, cfg)
         if not live:
-            subprocess.run(["systemctl", "restart", "xray"], capture_output=True)
+            subprocess.run(["systemctl", "restart", "xray"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print("sync-xray: xray restart attempted")
             save_runtime(skeleton_hash(applied), desired_clients(applied) if rc == 0 else {})
     return rc

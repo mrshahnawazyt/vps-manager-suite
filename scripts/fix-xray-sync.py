@@ -29,7 +29,7 @@ NO_RESTART = "--no-restart" in sys.argv
 
 def run(cmd, timeout=60):
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=timeout)
     except Exception as e:
         class R:  # minimal failed-result stand-in
             returncode = 1
