@@ -1,5 +1,5 @@
 # VPS Manager Suite - Nginx internal router template
-# Placeholders: __DOMAIN__, __PANEL_PORT__
+# Placeholders: __DOMAIN__, __PANEL_PORT__, __WSPROXY_PORT__
 user www-data;
 worker_processes auto;
 pid /run/nginx.pid;
@@ -45,8 +45,8 @@ http {
         location /xhttp { proxy_pass http://127.0.0.1:10004; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }
         location /xhttp-vmess { proxy_pass http://127.0.0.1:10005; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }
         location /xhttp-trojan { proxy_pass http://127.0.0.1:10006; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }
-        # SSH-WS: SSH account payloads arrive on this path (/sshws) -> ws-proxy (8080) -> Dropbear (109)
-        location /sshws { proxy_pass http://127.0.0.1:8080; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $remote_addr; proxy_read_timeout 3600s; }
+        # SSH-WS: SSH account payloads arrive on this path (/sshws) -> ws-proxy (__WSPROXY_PORT__) -> Dropbear (109)
+        location /sshws { proxy_pass http://127.0.0.1:__WSPROXY_PORT__; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $remote_addr; proxy_read_timeout 3600s; }
         location / { return 200 "VPS Manager Suite - OK\n"; add_header Content-Type text/plain; }
     }
 }
