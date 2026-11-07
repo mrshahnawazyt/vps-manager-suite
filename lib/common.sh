@@ -95,15 +95,16 @@ dns_check() {
 # and started again afterwards. (The old --http-01-port 8899 approach never
 # worked - ACME always arrives on port 80.)
 issue_ssl() {
-  local domain="$1" le_dir="/etc/letsencrypt/live/$1"
+  local domain="$1" force="${2:-}" le_dir="/etc/letsencrypt/live/$1"
   ensure_dirs; mkdir -p "$CONFIG_DIR/ssl"
   if command -v systemctl >/dev/null 2>&1; then
     systemctl stop haproxy nginx 2>/dev/null || true
   fi
   local got="" le_log="/var/log/vps-manager-certbot.log" le_reason=0
+  local force_flag=""; [[ "$force" == "force" ]] && force_flag="--force-renewal"
   if command -v certbot >/dev/null 2>&1; then
     mkdir -p "$(dirname "$le_log")" 2>/dev/null || true
-    if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos -m "admin@$domain" >"$le_log" 2>&1 \
+    if certbot certonly --standalone $force_flag -d "$domain" --non-interactive --agree-tos -m "admin@$domain" >"$le_log" 2>&1 \
        && [[ -s "$le_dir/fullchain.pem" && -s "$le_dir/privkey.pem" ]]; then
       cp "$le_dir/fullchain.pem" "$CONFIG_DIR/ssl/fullchain.pem" || true
       cp "$le_dir/privkey.pem" "$CONFIG_DIR/ssl/privkey.pem" || true
@@ -144,6 +145,96 @@ issue_ssl() {
     for s in haproxy nginx xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
   fi
   [[ -n "$got" ]]
+}
+
+# --- SSL: status, re-apply, auto-renew test + renewal hook -------------------
+ssl_days_left() {
+  # Whole days until the ACTIVE suite certificate expires (empty if unknown)
+  local cert="$CONFIG_DIR/ssl/fullchain.pem" end epoch now
+  [[ -s "$cert" ]] || return 0
+  end=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2) || return 0
+  [[ -n "$end" ]] || return 0
+  epoch=$(date -d "$end" +%s 2>/dev/null) || return 0
+  now=$(date +%s)
+  echo $(( (epoch - now) / 86400 ))
+}
+
+ssl_cert_summary() {
+  local cert="$CONFIG_DIR/ssl/fullchain.pem"
+  if [[ -s "$cert" ]]; then
+    echo "Subject : $(openssl x509 -subject -noout -in "$cert" 2>/dev/null | sed 's/^subject=//')"
+    echo "Issuer  : $(openssl x509 -issuer -noout -in "$cert" 2>/dev/null | sed 's/^issuer=//')"
+    echo "Expires : $(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2) ($(ssl_days_left) days left)"
+  else
+    echo "No certificate installed yet ($cert missing)"
+  fi
+}
+
+reapply_cert() {
+  # Copy the Let's Encrypt cert for the current domain into the suite ssl
+  # dir and restart every service that loads it (HAProxy combined file,
+  # Xray direct-TLS inbounds, the panel). Used after a renewal that
+  # happened outside the suite (e.g. a manual certbot run).
+  local domain le_dir
+  domain="$(get_domain)"
+  [[ -n "$domain" ]] || domain="$(python3 -c "import json;print(json.load(open('$DATA_DIR/config.json')).get('domain',''))" 2>/dev/null || echo "")"
+  le_dir="/etc/letsencrypt/live/$domain"
+  ensure_dirs; mkdir -p "$CONFIG_DIR/ssl"
+  if [[ -n "$domain" && -s "$le_dir/fullchain.pem" && -s "$le_dir/privkey.pem" ]]; then
+    cp "$le_dir/fullchain.pem" "$CONFIG_DIR/ssl/fullchain.pem" || true
+    cp "$le_dir/privkey.pem" "$CONFIG_DIR/ssl/privkey.pem" || true
+    chmod 600 "$CONFIG_DIR/ssl/privkey.pem" 2>/dev/null || true
+    cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
+    ok "Certificate for $domain re-applied from Let's Encrypt"
+  elif [[ -s "$CONFIG_DIR/ssl/fullchain.pem" ]]; then
+    cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
+    warn "No Let's Encrypt cert found for '$domain' - kept the existing suite certificate"
+  else
+    err "No certificate found to re-apply (domain: '$domain')"
+    return 1
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    for s in haproxy xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
+  fi
+  ssl_cert_summary
+}
+
+ssl_dry_run() {
+  # Test the auto-renewal path end to end WITHOUT touching the live cert.
+  # certbot's standalone authenticator needs port 80, so the web stack is
+  # paused for the test and started again right after.
+  command -v certbot >/dev/null 2>&1 || { err "certbot is not installed"; return 1; }
+  if command -v systemctl >/dev/null 2>&1; then systemctl stop haproxy nginx 2>/dev/null || true; fi
+  local rc=0
+  certbot renew --dry-run 2>&1 | tail -n 15 || rc=$?
+  if command -v systemctl >/dev/null 2>&1; then
+    for s in nginx haproxy xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
+  fi
+  return $rc
+}
+
+install_renewal_hook() {
+  # certbot deploy hook: after ANY successful renewal, push the fresh cert
+  # into the suite ssl dir and restart the services that use it, so the
+  # panel/Xray/HAProxy never serve an old cert after auto-renewal.
+  local hook=/etc/letsencrypt/renewal-hooks/deploy/vps-manager.sh
+  mkdir -p "$(dirname "$hook")" 2>/dev/null || return 0
+  cat > "$hook" <<'HOOK'
+#!/usr/bin/env bash
+# VPS Manager Suite - certbot deploy hook (installed by lib/common.sh)
+# RENEWED_LINEAGE points at the renewed cert's live directory.
+set -u
+SSL_DIR="/etc/vps-manager/ssl"
+[[ -n "${RENEWED_LINEAGE:-}" && -s "$RENEWED_LINEAGE/fullchain.pem" ]] || exit 0
+mkdir -p "$SSL_DIR"
+cp "$RENEWED_LINEAGE/fullchain.pem" "$SSL_DIR/fullchain.pem" || true
+cp "$RENEWED_LINEAGE/privkey.pem" "$SSL_DIR/privkey.pem" || true
+chmod 600 "$SSL_DIR/privkey.pem" 2>/dev/null || true
+cat "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" > "$SSL_DIR/combined.pem" 2>/dev/null || true
+for s in haproxy xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
+exit 0
+HOOK
+  chmod +x "$hook" 2>/dev/null || true
 }
 
 service_status() {
