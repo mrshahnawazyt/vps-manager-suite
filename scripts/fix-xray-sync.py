@@ -78,8 +78,11 @@ def main():
     tpl_p = os.path.join(SUITE_DIR, "templates", "nginx.conf.tpl")
     nginx_changed = False
     if os.path.exists(tpl_p) and domain:
+        ws_port = str(conf.get("ws_proxy_port") or 8080)
+        if not ws_port.isdigit():
+            ws_port = "8080"
         with open(tpl_p) as f:
-            want = f.read().replace("__DOMAIN__", domain).replace("__PANEL_PORT__", "9090")
+            want = f.read().replace("__DOMAIN__", domain).replace("__PANEL_PORT__", "9090").replace("__WSPROXY_PORT__", ws_port)
         have = ""
         if os.path.exists(NGINX_CFG):
             with open(NGINX_CFG) as f:

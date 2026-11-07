@@ -97,8 +97,10 @@ DOM_NOW=""
 if declare -F get_domain >/dev/null 2>&1; then DOM_NOW="$(get_domain 2>/dev/null || true)"; fi
 [[ -z "$DOM_NOW" && -f "${DATA_DIR:-/var/lib/vps-manager}/config.json" ]] && DOM_NOW=$(python3 -c "import json;print(json.load(open('${DATA_DIR:-/var/lib/vps-manager}/config.json')).get('domain',''))" 2>/dev/null || echo "")
 if [[ -n "$DOM_NOW" ]]; then
+  WS_PORT=$(python3 -c "import json;print(json.load(open('${DATA_DIR:-/var/lib/vps-manager}/config.json')).get('ws_proxy_port',8080))" 2>/dev/null || echo 8080)
+  [[ "$WS_PORT" =~ ^[0-9]+$ ]] || WS_PORT=8080
   if [[ -f "$SCRIPT_DIR/templates/nginx.conf.tpl" ]]; then
-    _want=$(sed "s/__DOMAIN__/$DOM_NOW/g; s/__PANEL_PORT__/9090/g" "$SCRIPT_DIR/templates/nginx.conf.tpl")
+    _want=$(sed "s/__DOMAIN__/$DOM_NOW/g; s/__PANEL_PORT__/9090/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/nginx.conf.tpl")
     if [[ "$_want" != "$(cat /etc/nginx/nginx.conf 2>/dev/null)" ]]; then
       echo "$_want" > /etc/nginx/nginx.conf 2>/dev/null && ok "nginx router re-rendered from the template" || warn "Could not rewrite the nginx config"
     fi

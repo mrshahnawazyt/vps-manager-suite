@@ -41,8 +41,10 @@ PANEL_PORT=$(grep -o 'VPSMGR_PORT=[0-9]*' /etc/systemd/system/vps-panel.service 
 PANEL_PORT="${PANEL_PORT:-9090}"
 
 # 2) re-render templates
+WS_PORT=$(python3 -c "import json;print(json.load(open('$DATA_DIR/config.json')).get('ws_proxy_port',8080))" 2>/dev/null || echo 8080)
+[[ "$WS_PORT" =~ ^[0-9]+$ ]] || WS_PORT=8080
 if [[ -f "$SUITE_DIR/templates/nginx.conf.tpl" ]]; then
-  sed "s/__DOMAIN__/$NEW/g; s/__PANEL_PORT__/$PANEL_PORT/g" "$SUITE_DIR/templates/nginx.conf.tpl" > /etc/nginx/nginx.conf
+  sed "s/__DOMAIN__/$NEW/g; s/__PANEL_PORT__/$PANEL_PORT/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SUITE_DIR/templates/nginx.conf.tpl" > /etc/nginx/nginx.conf
   if nginx -t 2>/dev/null; then
     systemctl restart nginx 2>/dev/null || true
     echo "[domain] nginx router re-rendered + restarted"
