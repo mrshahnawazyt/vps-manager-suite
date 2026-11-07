@@ -77,7 +77,7 @@ p=sys.argv[1]; d={}
 if os.path.exists(p):
     try: d=json.load(open(p))
     except: d={}
-d.update({"domain":sys.argv[2],"banner":d.get("banner","Welcome to VPS Manager Suite"),"qos_interface":d.get("qos_interface","eth0"),"qos_rate":d.get("qos_rate","950mbit"),"per_client_cap":0})
+d.update({"domain":sys.argv[2],"banner":d.get("banner","DDK VPS Manager"),"qos_interface":d.get("qos_interface","eth0"),"qos_rate":d.get("qos_rate","950mbit"),"per_client_cap":0})
 json.dump(d,open(p,"w"),indent=2)
 for f in ("ssh_users.json","xray_users.json","activity.json"):
     fp=os.path.join(os.path.dirname(p),f)
@@ -96,7 +96,13 @@ DROPBEAR_RECEIVE_WINDOW=65536
 EOF
 # Note: the -s/-g flags are NOT used - they block password logins,
 # and our tunnel users log in with passwords.
-echo "Welcome to VPS Manager Suite" > "$CONFIG_DIR/banner.txt" 2>/dev/null || true
+# Default SSH banner: the styled design (gold box, colored lines) rendered
+# by the shared banner renderer - the same design the panel's SSH Banner
+# Designer starts from. A stored design (reinstall) is re-rendered as-is.
+# Falls back to the plain line if the renderer is unavailable.
+if ! python3 "$SCRIPT_DIR/scripts/banner_render.py" write-default --config "$DATA_DIR/config.json" --out "$CONFIG_DIR/banner.txt" >/dev/null 2>&1; then
+  echo "DDK VPS Manager" > "$CONFIG_DIR/banner.txt" 2>/dev/null || true
+fi
 # Tunnel-only: new SSH users are created from the menu/panel/bot with
 # shell /bin/false. Dropbear rejects login shells that are not listed in
 # /etc/shells, so make sure the tunnel shell is a member right away.
