@@ -8,7 +8,17 @@ Credentials: /etc/vps-manager/credentials.json if it exists, else $DATA_DIR/cred
              NO default password) and printed once in the panel log/stdout.
 """
 import os, json, time, uuid, hashlib, secrets, subprocess, shutil, urllib.parse, html
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
+try:
+    from http.server import ThreadingHTTPServer
+except ImportError:
+    # Python 3.6 (Ubuntu 18.04) has no ThreadingHTTPServer (added in
+    # 3.7) - build the identical class from the threading mixin.
+    from http.server import HTTPServer as _HTTPServer
+    from socketserver import ThreadingMixIn as _ThreadingMixIn
+
+    class ThreadingHTTPServer(_ThreadingMixIn, _HTTPServer):
+        daemon_threads = True
 from http.cookies import SimpleCookie
 import ssl, sys, threading
 
@@ -71,7 +81,7 @@ def sync_xray():
                  os.path.join(BASE, "..", "scripts", "sync-xray.py"),
                  os.path.join(os.getcwd(), "scripts", "sync-xray.py")):
         if os.path.exists(cand):
-            try: subprocess.run(["python3", cand, "--restart"], timeout=30, capture_output=True)
+            try: subprocess.run(["python3", cand, "--restart"], timeout=30, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except Exception: pass
             return
 def save_config(c): save_json("config.json", c)
@@ -152,12 +162,42 @@ def fmt_limit(val, suffix=""):
 def fmt_data(val): return fmt_limit(val, " GB")
 def fmt_logins(val): return fmt_limit(val)
 
+
+def _date_from_iso(s):
+    """date.fromisoformat() equivalent that also works on Python 3.6."""
+    import datetime as _dt
+    return _dt.datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+
+
+def _datetime_from_iso(s):
+    """datetime.fromisoformat() equivalent that also works on Python 3.6.
+
+    Raises ValueError on bad input, like fromisoformat does.
+    """
+    import datetime as _dt
+    import re as _re
+    s = str(s).strip()
+    m = _re.search(r"([+-])(\d{2}):(\d{2})(?::(\d{2}))?$", s)
+    if m:  # strptime %z cannot parse a colon in the offset before 3.7
+        s = s[:m.start()] + m.group(1) + m.group(2) + m.group(3) + (m.group(4) or "")
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M%z", "%Y-%m-%d %H:%M:%S.%f%z",
+                "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d %H:%M%z",
+                "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return _dt.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError("Invalid isoformat string: %r" % (s,))
+
 def expires_on(created_ymd, days):
     """Expiry date string: ALWAYS created + Days (literal). 0 = same day as creation."""
     d = to_int(days, 30)
     try:
         import datetime as _dt
-        base = _dt.date.fromisoformat(str(created_ymd)[:10])
+        base = _date_from_iso(created_ymd)
         return (base + _dt.timedelta(days=d)).isoformat()
     except Exception: return f"+{d} days"
 
@@ -166,7 +206,7 @@ def is_expired(created_ymd, days):
     d = to_int(days, 30)
     try:
         import datetime as _dt
-        base = _dt.date.fromisoformat(str(created_ymd)[:10])
+        base = _date_from_iso(created_ymd)
         return _dt.date.today() > base + _dt.timedelta(days=d)
     except Exception: return False
 
@@ -255,7 +295,7 @@ def service_list():
     for n in names:
         status = "unknown"
         try:
-            r = subprocess.run(["systemctl", "is-active", n], capture_output=True, text=True, timeout=3)
+            r = subprocess.run(["systemctl", "is-active", n], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=3)
             status = r.stdout.strip() or "inactive"
         except Exception:
             status = "n/a (no systemd)"
@@ -511,7 +551,7 @@ def dead_note(acct):
     if not at: return ""
     try:
         import datetime as _dt
-        start = _dt.datetime.fromisoformat(str(at))
+        start = _datetime_from_iso(at)
         left = start + _dt.timedelta(hours=grace) - _dt.datetime.now()
         secs = int(left.total_seconds())
     except Exception:
@@ -540,7 +580,7 @@ def server_location():
 
 def _parse_day(s):
     import datetime as _dt
-    try: return _dt.date.fromisoformat(str(s)[:10])
+    try: return _date_from_iso(s)
     except Exception: return None
 
 def acct_renew(acct, add_days):
@@ -587,15 +627,15 @@ def system_user_create(username, password, expiry_ymd):
     """Create a real tunnel-only system user (root only). Best-effort: never raises."""
     if os.geteuid() != 0: return
     try:
-        exists = subprocess.run(["id", username], capture_output=True).returncode == 0
+        exists = subprocess.run(["id", username], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
         if not exists:
             r = subprocess.run(["useradd", "-M", "-s", "/usr/sbin/nologin", "-e", expiry_ymd, username],
-                               capture_output=True, text=True, timeout=10)
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10)
             if r.returncode != 0:
                 log_activity(f"ssh useradd failed for {username}: {(r.stderr or '').strip()[:120]}")
                 return
         r = subprocess.run(["chpasswd"], input=f"{username}:{password}\n",
-                           capture_output=True, text=True, timeout=10)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10)
         if r.returncode != 0:
             log_activity(f"ssh chpasswd failed for {username}: {(r.stderr or '').strip()[:120]}")
     except Exception as e:
@@ -606,7 +646,7 @@ def system_user_delete(username):
     """Remove the real system user (root only). Best-effort: never raises."""
     if os.geteuid() != 0: return
     try:
-        r = subprocess.run(["userdel", username], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["userdel", username], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10)
         if r.returncode != 0:
             log_activity(f"ssh userdel failed for {username}: {(r.stderr or '').strip()[:120]}")
     except Exception as e:
@@ -617,17 +657,17 @@ def system_user_lock(username, locked):
     """Lock: usermod -L + kill the user's sessions. Unlock: usermod -U."""
     if os.geteuid() != 0: return
     try:
-        subprocess.run(["usermod", "-L" if locked else "-U", username], capture_output=True, timeout=10)
+        subprocess.run(["usermod", "-L" if locked else "-U", username], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
         if locked:
             uid = subprocess.getoutput(f"id -u {username} 2>/dev/null").strip()
-            if uid.isdigit(): subprocess.run(["pkill", "-u", uid], capture_output=True, timeout=10)
+            if uid.isdigit(): subprocess.run(["pkill", "-u", uid], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
     except Exception as e:
         try: log_activity(f"ssh lock error for {username}: {e}")
         except Exception: pass
 
 def system_user_set_expiry(username, expiry_ymd):
     if os.geteuid() != 0: return
-    try: subprocess.run(["usermod", "-e", expiry_ymd, username], capture_output=True, timeout=10)
+    try: subprocess.run(["usermod", "-e", expiry_ymd, username], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
     except Exception: pass
 
 class Handler(BaseHTTPRequestHandler):
@@ -660,7 +700,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception: return
         rc = 1
         try:
-            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
             for line in proc.stdout:
                 try:
                     self.wfile.write(html.escape(line).encode()); self.wfile.flush()
@@ -1067,13 +1107,13 @@ class Handler(BaseHTTPRequestHandler):
                 if name == "vps-panel" and op in ("stop", "restart"):
                     subprocess.Popen(["bash", "-c", f"sleep 1; systemctl {op} vps-panel"])
                 else:
-                    subprocess.run(["systemctl", op, name], capture_output=True, timeout=30)
+                    subprocess.run(["systemctl", op, name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 log_activity(f"service {op} {name}")
             return self.redirect("/services")
         if p == "/action/restart-all":
             names = [x["name"] for x in service_list() if x["name"] not in ("vps-panel", "systemd-resolved")]
             for n in names:
-                try: subprocess.run(["systemctl", "restart", n], capture_output=True, timeout=30)
+                try: subprocess.run(["systemctl", "restart", n], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
                 except Exception: pass
             subprocess.Popen(["bash", "-c", "sleep 2; systemctl restart vps-panel"])
             log_activity("services restart all")
