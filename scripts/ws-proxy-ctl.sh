@@ -348,11 +348,11 @@ do_set_port(){
   # proxy, so its ws_proxy_direct backend must move with the port too.
   tmp2="$(mktemp)"
   if [[ -f "$SUITE_DIR/templates/haproxy.cfg.tpl" && -n "$dom" ]]; then
-    sed "s/__DOMAIN__/$dom/g; s/__WSPROXY_PORT__/$new/g" \
+    sed "s/__DOMAIN__/$dom/g; s/__WSPROXY_PORT__/$new/g; s/__WSPROXY_PROXY_PORT__/$((new+1))/g" \
       "$SUITE_DIR/templates/haproxy.cfg.tpl" > "$tmp2"
     info "HAProxy config rendered from the template (CONNECT backend now points to port $new)"
   elif [[ -f "$HAPROXY_CONF" ]]; then
-    sed -E "s|(server wsproxy 127\.0\.0\.1:)[0-9]+|\1$new|" "$HAPROXY_CONF" > "$tmp2"
+    sed -E "s|(server wsproxy 127\.0\.0\.1:)[0-9]+$|\1$new|; s|(server wsproxy 127\.0\.0\.1:)[0-9]+ send-proxy|\1$((new+1)) send-proxy|" "$HAPROXY_CONF" > "$tmp2"
     warn "Template or domain missing - updated only the wsproxy line of the live HAProxy config"
   else
     err "No HAProxy template and no live HAProxy config found - change aborted, nothing was modified"

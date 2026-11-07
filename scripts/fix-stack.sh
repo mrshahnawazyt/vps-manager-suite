@@ -142,7 +142,7 @@ if [[ -n "$DOM_NOW" ]]; then
     fi
   fi
   if [[ -f "$SCRIPT_DIR/templates/haproxy.cfg.tpl" && -d /etc/haproxy ]]; then
-    _want=$(sed "s/__DOMAIN__/$DOM_NOW/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl")
+    _want=$(sed "s/__DOMAIN__/$DOM_NOW/g; s/__WSPROXY_PORT__/$WS_PORT/g; s/__WSPROXY_PROXY_PORT__/$((WS_PORT+1))/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl")
     if [[ "$_want" != "$(cat /etc/haproxy/haproxy.cfg 2>/dev/null)" ]]; then
       echo "$_want" > /etc/haproxy/haproxy.cfg 2>/dev/null && ok "haproxy config re-rendered from the template" || warn "Could not rewrite the haproxy config"
     fi

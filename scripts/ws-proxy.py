@@ -70,6 +70,15 @@ def log_connection(ip, via):
         pass
 
 
+# RFC 6455's own example key. Minimal payload clients (DarkTunnel and
+# friends) often send "Upgrade: websocket" with NO Sec-WebSocket-Key at
+# all; answering with an EMPTY Sec-WebSocket-Accept then produces a
+# malformed 101 that strict HTTP hops (HAProxy in http mode) reject
+# outright. Computing the accept from this fixed fallback key keeps the
+# 101 well-formed - the bytes after it are a raw SSH tunnel either way.
+FALLBACK_WS_KEY = "dGhlIHNhbXBsZSBub25jZQ=="
+
+
 def ws_accept(req):
     key = ""
     for line in req.decode("latin1", "ignore").split("\r\n"):
@@ -77,7 +86,7 @@ def ws_accept(req):
             key = line.split(":", 1)[1].strip()
             break
     if not key:
-        return ""
+        key = FALLBACK_WS_KEY
     return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
 
 
