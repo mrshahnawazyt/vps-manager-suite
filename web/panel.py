@@ -331,9 +331,20 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     proto = "http"
-    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(CERT_FILE, KEY_FILE); srv.socket = ctx.wrap_socket(srv.socket, server_side=True); proto = "https"
-    print(f"VPS Manager Panel listening on {proto}://{HOST}:{PORT}  data={DATA_DIR}")
+    # Cert sirf tab use karo jab dono files maujood bhi hon aur khaali bhi na hon.
+    # Cert load fail ho to panel crash NA kare — HTTP par chale aur wajah log me likhe,
+    # taaki user panel khol kar ya menu 03 se SSL baad me theek kar sake.
+    cert_ok = (os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)
+               and os.path.getsize(CERT_FILE) > 0 and os.path.getsize(KEY_FILE) > 0)
+    if cert_ok:
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(CERT_FILE, KEY_FILE)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+            proto = "https"
+        except Exception as e:
+            print(f"WARNING: SSL cert load fail ({e}) — panel HTTP par chal raha hai. Menu option 03 se SSL dobara issue karo.", flush=True)
+    print(f"VPS Manager Panel listening on {proto}://{HOST}:{PORT}  data={DATA_DIR}", flush=True)
     try: srv.serve_forever()
     except KeyboardInterrupt: pass
 
