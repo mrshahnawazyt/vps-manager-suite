@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""Simple WebSocket -> SSH proxy placeholder (stdlib only).
-Listens 127.0.0.1:18081 / external via HAProxy, forwards bytes to Dropbear/SSH 127.0.0.1:109 (or 22).
-Real WS handshake ka minimal handling: Upgrade header dekh ke raw TCP tunnel bana deta hai.
-Production me isko hardened proxy se replace kar sakte ho.
+"""Simple WebSocket -> SSH proxy (stdlib only).
+0.0.0.0:8080 par sunta hai (env WS_PROXY_PORT), Nginx ke /sshws route ke peeche
+istemaal hota hai, aur bytes ko Dropbear/SSH 127.0.0.1:109 par forward karta hai.
+WS handshake ka asal Sec-WebSocket-Accept (RFC 6455) calculate karke 101 deta
+hai, phir raw TCP tunnel bana deta hai.
 """
-import socket, threading, select, os
+import socket, threading, select, os, hashlib, base64
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+def ws_accept(req: bytes) -> str:
+    key = ""
+    for line in req.decode("latin1", "ignore").split("\r\n"):
+        if line.lower().startswith("sec-websocket-key:"):
+            key = line.split(":", 1)[1].strip(); break
+    if not key: return ""
+    return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
 LISTEN_HOST = os.environ.get("WS_PROXY_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.environ.get("WS_PROXY_PORT", "8080"))
 TARGET = ("127.0.0.1", int(os.environ.get("SSH_PORT_INTERNAL", "109")))
@@ -26,8 +37,9 @@ def pipe(a, b):
 def handle(client, addr):
     try:
         req = client.recv(4096)
-        if b"Upgrade: websocket" in req or b"upgrade: websocket" in req.lower():
-            client.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: placeholder\r\n\r\n")
+        if b"upgrade: websocket" in req.lower():
+            acc = ws_accept(req)
+            client.sendall(f"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {acc}\r\n\r\n".encode())
         target = socket.create_connection(TARGET, timeout=10)
         threading.Thread(target=pipe, args=(client, target), daemon=True).start()
         pipe(target, client)

@@ -6,8 +6,11 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SCRIPT_DIR/lib/common.sh" 2>/dev/null || true
 DATA="${VPSMGR_DATA_DIR:-/var/lib/vps-manager}"
-# Panel local-dev data fallback
-[[ -f "$DATA/ssh_users.json" ]] || DATA="${VPSMGR_DATA_DIR:-$SCRIPT_DIR/data}"
+# Dono account files wahi se lo jahan maujood hon (pehle ssh file hi na ho to
+# data dir galat switch ho jata tha)
+if [[ ! -f "$DATA/ssh_users.json" && ! -f "$DATA/xray_users.json" && -d "$SCRIPT_DIR/data" ]]; then
+  DATA="$SCRIPT_DIR/data"
+fi
 echo "[limit-check] $(date -Is) data=$DATA"
 python3 - "$DATA" <<'PY'
 import json, os, sys, datetime
