@@ -100,17 +100,28 @@ issue_ssl() {
   if command -v systemctl >/dev/null 2>&1; then
     systemctl stop haproxy nginx 2>/dev/null || true
   fi
-  local got=""
+  local got="" le_log="/var/log/vps-manager-certbot.log" le_reason=0
   if command -v certbot >/dev/null 2>&1; then
-    if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos -m "admin@$domain" >/dev/null 2>&1 \
+    mkdir -p "$(dirname "$le_log")" 2>/dev/null || true
+    if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos -m "admin@$domain" >"$le_log" 2>&1 \
        && [[ -s "$le_dir/fullchain.pem" && -s "$le_dir/privkey.pem" ]]; then
       cp "$le_dir/fullchain.pem" "$CONFIG_DIR/ssl/fullchain.pem" || true
       cp "$le_dir/privkey.pem" "$CONFIG_DIR/ssl/privkey.pem" || true
       got="letsencrypt"
+    elif [[ -s "$le_log" ]]; then
+      # Show the real reason (DNS mismatch, port 80 blocked, rate limit...)
+      # instead of only guessing - the full certbot output stays in $le_log.
+      warn "Let's Encrypt failed - certbot reported (full log: $le_log):"
+      local _le_lines=""
+      _le_lines="$(grep -iE "error|unauthorized|timeout|refused|invalid" "$le_log" 2>/dev/null | tail -n 3 || true)"
+      if [[ -n "$_le_lines" ]]; then
+        while IFS= read -r _l; do echo "  $_l"; done <<< "$_le_lines"
+        le_reason=1
+      fi
     fi
   fi
   if [[ -z "$got" ]]; then
-    warn "Let's Encrypt failed (DNS/port 80)"
+    [[ "$le_reason" -eq 0 ]] && warn "Let's Encrypt failed (DNS/port 80)"
     warn "Creating a self-signed fallback"
     if command -v openssl >/dev/null 2>&1; then
       openssl req -x509 -newkey rsa:2048 -keyout "$CONFIG_DIR/ssl/privkey.pem" \
@@ -140,6 +151,66 @@ service_status() {
   if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$svc" 2>/dev/null; then echo "active"; else
     if pgrep -x "$svc" >/dev/null 2>&1; then echo "active (process)"; else echo "inactive"; fi
   fi
+}
+
+# --- Xray service identity ---------------------------------------------------
+# The official Xray install script creates a systemd unit that runs the
+# service as User=nobody. That user cannot read this suite's TLS private
+# key ($CONFIG_DIR/ssl/privkey.pem, mode 600) which the TLS inbounds load,
+# and cannot write the access log under /var/log/xray - so the service
+# dies at startup even though a config test run as root passes.
+# A systemd drop-in switches the service to root, which owns both paths.
+# Idempotent: the drop-in is only rewritten when its content differs.
+XRAY_DROPIN_DIR="${VPSMGR_XRAY_DROPIN_DIR:-/etc/systemd/system/xray.service.d}"
+XRAY_DROPIN_FILE="$XRAY_DROPIN_DIR/10-vpsmanager.conf"
+XRAY_LOG_DIR_PATH="${VPSMGR_XRAY_LOG_DIR:-/var/log/xray}"
+XRAY_CFG_DIR_PATH="${VPSMGR_XRAY_CFG_DIR:-/usr/local/etc/xray}"
+
+ensure_xray_service() {
+  mkdir -p "$XRAY_LOG_DIR_PATH" "$XRAY_CFG_DIR_PATH" "$XRAY_DROPIN_DIR" 2>/dev/null || true
+  local want=""
+  want="$(cat <<'EOF'
+# VPS Manager Suite: run the Xray service as root.
+# The stock Xray unit runs as User=nobody, which cannot read this suite's
+# TLS private key (mode 600) loaded by the TLS inbounds, and cannot write
+# the access log under /var/log/xray - the service dies at startup.
+# Root owns both paths, so the service starts reliably.
+[Service]
+User=root
+EOF
+)"
+  local cur=""
+  if [[ -f "$XRAY_DROPIN_FILE" ]]; then cur="$(cat "$XRAY_DROPIN_FILE" 2>/dev/null || true)"; fi
+  if [[ "$cur" != "$want" ]]; then
+    if printf '%s\n' "$want" > "$XRAY_DROPIN_FILE" 2>/dev/null; then
+      info "Xray service drop-in installed: the service will run as root ($XRAY_DROPIN_FILE)"
+    else
+      warn "Could not write the Xray service drop-in: $XRAY_DROPIN_FILE"
+      return 1
+    fi
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload 2>/dev/null || true
+  fi
+  return 0
+}
+
+# verify_xray_running - call right after a restart of the xray service.
+# Prints an [OK] line when the service is active; otherwise a clear
+# failure line plus the last journal lines verbatim, so the real reason
+# is visible on screen instead of a silent "stopped" in the panel.
+verify_xray_running() {
+  if ! command -v systemctl >/dev/null 2>&1; then return 0; fi
+  if systemctl is-active --quiet xray 2>/dev/null; then
+    ok "xray is running"
+    return 0
+  fi
+  err "xray FAILED to start - the last log lines are:"
+  if command -v journalctl >/dev/null 2>&1; then
+    journalctl -u xray -n 5 --no-pager -o cat 2>/dev/null || true
+  fi
+  warn "Full Xray log: journalctl -u xray -n 50"
+  return 1
 }
 
 print_ports() {
