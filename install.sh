@@ -40,7 +40,7 @@ banner "VPS Manager Suite v1.0 — Install All Components"
 
 # 1) Domain poochho
 DOMAIN="${1:-}"
-if [[ -z "$DOMAIN" ]]; then read -rp "Apna domain likho (e.g. vpn.example.com): " DOMAIN; fi
+if [[ -z "$DOMAIN" ]]; then read -rp "Apna domain likho (e.g. vpn.apna-domain.com): " DOMAIN; fi
 [[ -z "$DOMAIN" ]] && { err "Domain zaroori hai"; exit 1; }
 save_config_key domain "$DOMAIN"
 info "Domain: $DOMAIN"; dns_check "$DOMAIN" || warn "DNS abhi sahi nahi — SSL step fail ho sakta hai, baad me menu option 03 se dobara try karna."
@@ -49,7 +49,10 @@ info "Domain: $DOMAIN"; dns_check "$DOMAIN" || warn "DNS abhi sahi nahi — SSL 
 info "Packages install ho rahe hain..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl wget unzip jq nginx haproxy dropbear stunnel4 certbot python3 python3-pip iproute2 iptables ufw speedtest-cli uuid-runtime cron || apt-get install -y curl wget unzip jq nginx haproxy dropbear certbot python3 iproute2 cron
+# Note: ufw jaan-boojh kar NAHI lagaya — installer firewall enable nahi karta,
+# warna 9090/443 jaise ports band hone ka risk hota hai. openssl zaroori hai
+# (self-signed fallback aur Xray/Panel ke cert ke liye).
+apt-get install -y curl wget unzip jq nginx haproxy dropbear stunnel4 certbot python3 python3-pip iproute2 openssl speedtest-cli uuid-runtime cron || apt-get install -y curl wget unzip jq nginx haproxy dropbear certbot python3 iproute2 openssl cron
 
 # 3) Panel credentials banao (agar pehle nahi hain)
 PANEL_USER="admin"; PANEL_PASS=""
@@ -85,14 +88,16 @@ info "Dropbear configure ho raha hai..."
 cat > /etc/default/dropbear <<EOF
 NO_START=0
 DROPBEAR_PORT=109
-DROPBEAR_EXTRA_ARGS="-p 143 -w -s -g"
+DROPBEAR_EXTRA_ARGS="-p 143"
 DROPBEAR_BANNER="/etc/vps-manager/banner.txt"
 DROPBEAR_RECEIVE_WINDOW=65536
 EOF
+# Note: -s/-g flags NAHI lagaye — woh password logins band kar dete hain,
+# aur hamare tunnel users password se hi login karte hain.
 echo "Welcome to VPS Manager Suite" > "$CONFIG_DIR/banner.txt" 2>/dev/null || true
 # Tunnel-only note: naye SSH users menu/panel se bante hain with shell /usr/sbin/nologin
 
-# 5) ws-proxy (Python placeholder service)
+# 5) ws-proxy (Python service)
 info "ws-proxy service lag raha hai (port 8080 -> SSH 109)..."
 install -m 755 "$SCRIPT_DIR/scripts/ws-proxy.py" /usr/local/bin/vps-ws-proxy.py
 cat > /etc/systemd/system/ws-proxy.service <<'EOF'
@@ -115,28 +120,39 @@ sed "s/__DOMAIN__/$DOMAIN/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl" > /etc/hapr
 nginx -t || warn "nginx config test warning"
 haproxy -c -f /etc/haproxy/haproxy.cfg || warn "haproxy config test warning"
 
-# 7) SSL - Let's Encrypt, fallback self-signed
+# 7) SSL - Let's Encrypt (standalone, port 80) ya self-signed fallback.
+# common.sh wala issue_ssl istemal karo — woh port 80 khaali karne ke liye
+# nginx/haproxy rokta hai, cert verify karta hai, aur combined.pem banata hai.
 info "SSL certificate ki koshish (Let's Encrypt)..."
-mkdir -p "$CONFIG_DIR/ssl"
-if certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos -m "admin@$DOMAIN" --http-01-port 8899 2>/dev/null; then
-  cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$CONFIG_DIR/ssl/fullchain.pem" || true
-  cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$CONFIG_DIR/ssl/privkey.pem" || true
-  ok "Let's Encrypt SSL mil gaya."
-else
-  warn "Let's Encrypt fail (DNS/port?) — self-signed fallback bana raha hoon. Menu 03 se baad me renew kar lena."
-  openssl req -x509 -newkey rsa:2048 -keyout "$CONFIG_DIR/ssl/privkey.pem" -out "$CONFIG_DIR/ssl/fullchain.pem" -days 365 -nodes -subj "/CN=$DOMAIN" 2>/dev/null || true
-fi
-# HAProxy/Xray ke liye combined pem bhi rakh lo
-cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
+issue_ssl "$DOMAIN" || warn "SSL step fail — panel HTTP par chalega, Xray TLS inbounds ke liye menu 03 se SSL dobara issue karo."
 
 # 8) Xray (official script) + config
 info "Xray install ho raha hai (official script)..."
 if ! command -v xray >/dev/null 2>&1; then
-  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || warn "Xray official install fail — internet/GitHub check karo, phir menu 01 dobara chalao."
+  _xsh="$(mktemp)"
+  if curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$_xsh" && [[ -s "$_xsh" ]]; then
+    bash "$_xsh" install || warn "Xray official install script fail ho gaya."
+  else
+    warn "Xray install script download fail — internet/GitHub check karo, phir menu 01 dobara chalao."
+  fi
+  rm -f "$_xsh"
 fi
 mkdir -p /usr/local/etc/xray
-sed "s/__DOMAIN__/$DOMAIN/g" "$SCRIPT_DIR/templates/xray.json.tpl" > /usr/local/etc/xray/config.json
-# Xray paths: VMess /vmess (10001), VLESS /vless (10002), Trojan /trojan (10003), XHTTP /xhttp (10004), TLS fallback 10443
+# Seed client: har inbound me kam az kam ek client rakho (bootstrap UUID).
+# Asal user accounts baad me scripts/sync-xray.py se add hote hain.
+XRAY_SEED_UUID="$(gen_uuid)"
+sed "s/__DOMAIN__/$DOMAIN/g; s/__UUID__/$XRAY_SEED_UUID/g" "$SCRIPT_DIR/templates/xray.json.tpl" > /usr/local/etc/xray/config.json
+if command -v xray >/dev/null 2>&1; then
+  ok "Xray binary: $(xray version 2>/dev/null | head -n1)"
+  if xray run -test -c /usr/local/etc/xray/config.json >/dev/null 2>&1; then
+    ok "Xray config test OK"
+  else
+    err "Xray config test FAIL — 'xray run -test -c /usr/local/etc/xray/config.json' chala kar error dekho. Aam wajah: SSL cert files missing."
+  fi
+else
+  warn "Xray binary install nahi hua — xray service start nahi hogi. Internet check karke menu 01 dobara chalao."
+fi
+# Xray paths: VMess /vmess (10001), VLESS /vless (10002), Trojan /trojan (10003), XHTTP /xhttp (10004), TLS fallback 10443, VLESS TCP 8443
 
 # 9) CAKE QoS
 info "CAKE QoS (Ping Stability)..."
@@ -162,25 +178,33 @@ EOF
 cat > /etc/cron.d/vps-manager-limits <<EOF
 */10 * * * * root bash $SCRIPT_DIR/scripts/limit-check.sh >> /var/log/vps-manager-limits.log 2>&1
 EOF
-# vpsmenu / menu = chhota wrapper jo /opt wale suite folder se menu chalata hai
+# vpsmenu / menu / vpsupdate = chhote wrappers jo /opt wale suite folder se chalte hain
 # (akeli file copy karne se lib/common.sh nahi milta tha — is liye wrapper hai)
 for _cmd in vpsmenu menu; do
   printf '#!/usr/bin/env bash\nexec bash %s/menu.sh "$@"\n' "$SCRIPT_DIR" > "/usr/local/bin/$_cmd"
   chmod +x "/usr/local/bin/$_cmd"
 done
+printf '#!/usr/bin/env bash\nexec bash %s/update.sh "$@"\n' "$SCRIPT_DIR" > /usr/local/bin/vpsupdate
+chmod +x /usr/local/bin/vpsupdate
 
 # 12) Services enable + health check
 systemctl daemon-reload || true
 for svc in nginx haproxy dropbear ws-proxy vps-panel xray; do systemctl enable --now "$svc" 2>/dev/null && ok "$svc up" || warn "$svc start check karo: systemctl status $svc"; done
 
-IP=$(curl -s --max-time 5 https://api.ipify.org || echo "YOUR_SERVER_IP")
+IP=$(curl -s --max-time 5 https://api.ipify.org || ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1 || hostname -I 2>/dev/null | awk '{print $1}')
 EXPIRY_DATE=$(date -d "+365 days" +%F 2>/dev/null || echo "-")
 log_activity "install completed for $DOMAIN"
 banner "INSTALL COMPLETE — Summary (video style)"
+# Panel ka sahi URL: cert hai to panel SIRF HTTPS par hai (http wala link dead hoga)
+if [[ -s "$CONFIG_DIR/ssl/fullchain.pem" && -s "$CONFIG_DIR/ssl/privkey.pem" ]]; then
+  PANEL_LINE="https://$DOMAIN:9090   (panel sirf HTTPS par hai — http:// wala link NAHI chalega)"
+else
+  PANEL_LINE="http://${IP:-127.0.0.1}:9090   (SSL nahi bana, is liye panel HTTP par hai; bahar se kholne ke liye is IP ki jagah apni asal server IP lagao)"
+fi
 cat <<EOF
   Domain          : $DOMAIN
-  Server IP       : $IP
-  Panel URL       : https://$DOMAIN:9090  (agar SSL hai)  |  http://$IP:9090
+  Server IP       : ${IP:-detect nahi hua}
+  Panel URL       : $PANEL_LINE
   Panel Username  : admin
   Panel Password  : $PANEL_PASS
   Credentials file: $CREDS_FILE  (aur $DATA_DIR/credentials.json)
