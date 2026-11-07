@@ -163,6 +163,19 @@ DBEOF
 if [[ "$(cat /etc/default/dropbear 2>/dev/null)" != "$_want_db" ]]; then
   echo "$_want_db" > /etc/default/dropbear 2>/dev/null && ok "dropbear config restored (ports 109, 143, 447)" || warn "Could not rewrite the dropbear config"
 fi
+# 2c) SSH banner file: heal a missing banner, and upgrade the old plain
+#     one-line stock banner to the styled default design (gold box). A
+#     custom banner - panel designer, terminal menu or Telegram bot - is
+#     never overwritten.
+BANNER_FILE_FIX="${CONFIG_DIR:-/etc/vps-manager}/banner.txt"
+_bf_cur="$(cat "$BANNER_FILE_FIX" 2>/dev/null || true)"
+if [[ -z "$_bf_cur" || "$_bf_cur" == "Welcome to VPS Manager Suite" || "$_bf_cur" == "DDK VPS Manager" ]]; then
+  if python3 "$SCRIPT_DIR/scripts/banner_render.py" write-default --config "${DATA_DIR:-/var/lib/vps-manager}/config.json" --out "$BANNER_FILE_FIX" >/dev/null 2>&1; then
+    ok "SSH banner set to the styled default design"
+  elif [[ -z "$_bf_cur" ]]; then
+    echo "DDK VPS Manager" > "$BANNER_FILE_FIX" 2>/dev/null || warn "Could not write the SSH banner file"
+  fi
+fi
 # 3) Xray deep repair (backups + rebuild preserving accounts + verify)
 if [[ -f "$SCRIPT_DIR/scripts/fix-xray-sync.py" ]]; then
   info "Running the Xray repair (fix-xray-sync)..."
