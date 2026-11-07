@@ -20,7 +20,7 @@ except ImportError:
     class ThreadingHTTPServer(_ThreadingMixIn, _HTTPServer):
         daemon_threads = True
 from http.cookies import SimpleCookie
-import ssl, sys, threading
+import ssl, sys, threading, socket
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 # Pure-python QR generator (scripts/qr.py) for Xray link QR codes
@@ -470,15 +470,63 @@ function copyString(txt, btn){
 /* --- Animated action popup -------------------------------------------------
    Any form with a data-stream="Title" attribute is submitted in the
    background instead of navigating away: the popup opens at once, shows
-   "Starting...", then appends the server's output lines as they arrive.
-   The stream is plain text; a line containing only :::RESULT::: switches
-   the rest of the stream to a raw HTML fragment (the result card), which
-   is rendered below the output when the stream ends. Forms with
-   data-reload refresh the page behind the popup when it is closed after
-   a finished run, so lists and statuses are up to date. */
+   "Starting...", and the server's output is then REVEALED line by line
+   at a calm, readable pace (POP_PACE_MS per line). The network stream
+   may deliver lines in bursts (several steps finish within the same
+   millisecond), so incoming lines wait in a queue and are shown one at
+   a time, auto-scrolling as they appear - the reveal pace, not the
+   network, decides how fast text lands on screen. A line containing
+   only :::RESULT::: switches the rest of the stream to a raw HTML
+   fragment (the result card), which is rendered below the output only
+   after the last queued line has been revealed. On long jobs whose
+   output arrives slower than the reveal pace the display is simply
+   live; if a burst ever queues more than POP_CATCHUP_AFTER lines the
+   reveal temporarily quickens so it never lags far behind the stream.
+   "Copy output" always copies the FULL text received so far, including
+   lines still waiting in the queue. Forms with data-reload refresh the
+   page behind the popup when it is closed after a finished run. */
+var POP_PACE_MS = 250, POP_CATCHUP_AFTER = 40;
 var popBusy = false, popReload = false, popDone = false;
+var popRun = 0, popRevealer = null, popCopySource = null;
+
+/* POP_REVEALER_BEGIN - pure pacing logic, no DOM access (unit-tested
+   headlessly). showLine(line) displays one line; onDrain() fires once,
+   when finish() has been called AND every queued line has been shown;
+   copyText() returns every line received so far, revealed or not. */
+function makeLineRevealer(showLine, onDrain, paceMs){
+  var pace = paceMs || POP_PACE_MS;
+  var queue = [], full = [], timer = null, streamDone = false, drained = false;
+  function perTick(){
+    return queue.length > POP_CATCHUP_AFTER ? Math.ceil(queue.length / 10) : 1;
+  }
+  function drainCheck(){
+    if(streamDone && !queue.length && !drained){ drained = true; if(onDrain) onDrain(); }
+  }
+  function tick(){
+    timer = null;
+    var n = perTick();
+    while(n-- > 0 && queue.length) showLine(queue.shift());
+    if(queue.length) timer = setTimeout(tick, pace);
+    else drainCheck();
+  }
+  function kick(){ if(!timer && queue.length) timer = setTimeout(tick, pace); }
+  return {
+    pushLine: function(line){ full.push(line); queue.push(line); kick(); },
+    finish: function(){ streamDone = true; kick(); drainCheck(); },
+    flushAll: function(){
+      if(timer){ clearTimeout(timer); timer = null; }
+      while(queue.length) showLine(queue.shift());
+      drainCheck();
+    },
+    copyText: function(){ return full.join('\\n'); },
+    pending: function(){ return queue.length; }
+  };
+}
+/* POP_REVEALER_END */
+
 function openPop(title){
   var ov = document.getElementById('pop-overlay'); if(!ov) return false;
+  popRun++;
   document.getElementById('pop-title').textContent = title;
   document.getElementById('pop-out').textContent = 'Starting...';
   document.getElementById('pop-result').innerHTML = '';
@@ -488,12 +536,17 @@ function openPop(title){
 }
 function closePop(){
   var ov = document.getElementById('pop-overlay'); if(!ov) return;
+  if(popRevealer) popRevealer.flushAll();
   ov.classList.remove('open'); document.body.style.overflow = '';
   if(popReload && popDone){ popReload = false; location.reload(); }
 }
 function copyPop(btn){
-  var el = document.getElementById('pop-out'); if(!el) return;
-  copyString(el.innerText || el.textContent, btn);
+  var txt = popCopySource ? popCopySource() : null;
+  if(txt === null || txt === undefined || txt === ''){
+    var el = document.getElementById('pop-out'); if(!el) return;
+    txt = el.innerText || el.textContent;
+  }
+  copyString(txt, btn);
 }
 document.addEventListener('submit', function(ev){
   var f = ev.target;
@@ -509,42 +562,80 @@ document.addEventListener('submit', function(ev){
   if(!openPop(title)){ f.submit(); return; }
   popBusy = true; popDone = false;
   popReload = f.getAttribute('data-reload') !== null;
+  var myRun = popRun;
   var out = document.getElementById('pop-out'), res = document.getElementById('pop-result'), st = document.getElementById('pop-status');
-  var buf = '', marker = ':::RESULT:::', markerAt = -1;
-  function render(end){
-    var t = markerAt >= 0 ? buf.slice(0, markerAt) : buf;
-    out.textContent = t.replace(/\\s+$/, '');
+  var shown = [], fragMode = false, fragText = '', linePartial = '';
+  var revealer = makeLineRevealer(function(line){
+    shown.push(line);
+    out.textContent = shown.join('\\n');
     out.scrollTop = out.scrollHeight;
-    if(end && markerAt >= 0){ res.innerHTML = buf.slice(markerAt + marker.length).replace(/^\\n+/, ''); }
+  }, function(){
+    if(fragMode) res.innerHTML = fragText.replace(/^\\n+/, '');
+    if(st) st.textContent = 'Finished';
+    popBusy = false; popDone = true;
+  });
+  popRevealer = revealer;
+  popCopySource = function(){ return revealer.copyText(); };
+  function alive(){ return myRun === popRun; }
+  function ingest(text){
+    if(fragMode){ fragText += text; return; }
+    linePartial += text;
+    var start = 0, nl;
+    while((nl = linePartial.indexOf('\\n', start)) >= 0){
+      var ln = linePartial.slice(start, nl);
+      if(ln.charAt(ln.length - 1) === '\\r') ln = ln.slice(0, -1);
+      if(ln === ':::RESULT:::'){
+        fragMode = true;
+        fragText = linePartial.slice(nl + 1);
+        linePartial = '';
+        return;
+      }
+      revealer.pushLine(ln);
+      start = nl + 1;
+    }
+    linePartial = linePartial.slice(start);
+  }
+  function ingestEnd(){
+    if(!fragMode && linePartial){
+      var ln = linePartial; linePartial = '';
+      if(ln.charAt(ln.length - 1) === '\\r') ln = ln.slice(0, -1);
+      if(ln === ':::RESULT:::') fragMode = true;
+      else revealer.pushLine(ln);
+    }
+    revealer.finish();
+  }
+  function failLine(msg){
+    revealer.pushLine('');
+    revealer.pushLine(msg);
+    ingestEnd();
   }
   var params = new URLSearchParams();
   fd.forEach(function(v, k){ params.append(k, v); });
   fetch(f.action, {method: 'POST', headers: {'X-Stream': 'popup'}, body: params, credentials: 'same-origin'})
   .then(function(resp){
+    if(!alive()) return null;
     if(!resp.ok){
-      buf += '\\n[ERROR] The request was refused (HTTP ' + resp.status + '). If your role is Viewer, actions are read-only.\\n';
-      render(true); return null;
+      failLine('[ERROR] The request was refused (HTTP ' + resp.status + '). If your role is Viewer, actions are read-only.');
+      return null;
     }
     if(!resp.body || !resp.body.getReader){
-      return resp.text().then(function(t){ buf += t; markerAt = buf.indexOf(marker); render(true); });
+      return resp.text().then(function(t){ if(!alive()) return; ingest(t); ingestEnd(); });
     }
     var reader = resp.body.getReader(), dec = new TextDecoder();
     function pump(){
       return reader.read().then(function(r){
-        if(r.done){ render(true); return; }
-        buf += dec.decode(r.value, {stream: true});
-        if(markerAt < 0) markerAt = buf.indexOf(marker);
-        render(false);
+        if(!alive()) return;
+        if(r.done){ ingestEnd(); return; }
+        ingest(dec.decode(r.value, {stream: true}));
         return pump();
       });
     }
     return pump();
   })
   .catch(function(e){
-    buf += '\\n[ERROR] The connection to the panel was lost while the action was running.\\n';
-    render(true);
-  })
-  .then(function(){ popBusy = false; popDone = true; if(st) st.textContent = 'Finished'; });
+    if(!alive()) return;
+    failLine('[ERROR] The connection to the panel was lost while the action was running.');
+  });
 });
 document.addEventListener('keydown', function(ev){ if(ev.key === 'Escape') closePop(); });
 </script>"""
@@ -857,6 +948,16 @@ def system_user_set_expiry(username, expiry_ymd):
     except Exception: pass
 
 class Handler(BaseHTTPRequestHandler):
+    # Streamed popup responses must leave the process the moment a line is
+    # written: wfile stays unbuffered (this is also the library default, it
+    # is pinned here so no Python version can change it under us) and the
+    # socket runs with TCP_NODELAY so a small line is never held back by
+    # Nagle coalescing on its way to the phone.
+    wbufsize = 0
+    def setup(self):
+        super().setup()
+        try: self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception: pass
     def log_message(self, *a): pass
     def session_user(self):
         c = SimpleCookie(self.headers.get("Cookie", ""))
@@ -909,7 +1010,8 @@ class Handler(BaseHTTPRequestHandler):
             rc = _pipe_lines(argv, emit)
             emit("[OK] Finished (exit %d)." % rc if rc == 0 else "[ERROR] Finished with exit code %d." % rc)
             return
-        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
+        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache"); self.send_header("X-Accel-Buffering", "no"); self.end_headers()
         head = ("<!DOCTYPE html><html><head><meta charset='utf-8'><title>" + html.escape(title) + "</title></head>"
                 "<body style='background:#0b0f14;color:#dbe4ee;font-family:monospace;padding:18px'>"
                 "<h3 style='font-family:system-ui'>" + html.escape(title) + "</h3><pre style='white-space:pre-wrap'>")
