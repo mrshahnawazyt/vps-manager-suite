@@ -112,9 +112,57 @@ build_haproxy_pem() {
   return 1
 }
 
+# --- Front-door (haproxy/nginx) restore safety ------------------------------
+# certbot --standalone needs port 80 free, so issue_ssl() and ssl_dry_run()
+# STOP haproxy and nginx while it runs. Those two MUST come back on every
+# exit path afterwards. An earlier version "restored" them at the end with
+# `systemctl try-restart` - but try-restart only restarts a unit that is
+# ALREADY running and is a silent no-op (exit 0, no journal entry) on a
+# stopped one. So the two services that had just been stopped were exactly
+# the two that never started again: every SSL issue through this path left
+# HAProxy and nginx down with no error anywhere (live incident 2026-11-07:
+# HAProxy `inactive` with a valid config and certificate; the journal
+# showed the clean stop and no start attempt after it).
+# web_stack_restore() uses a real `restart` (which also starts stopped
+# units) and then VERIFIES with is-active, printing a loud [ERROR] with
+# the exact diagnose commands when a front door is still down.
+web_stack_verify() {
+  # web_stack_verify [service ...]   (default: haproxy nginx)
+  command -v systemctl >/dev/null 2>&1 || return 0
+  local svcs="${*:-haproxy nginx}" s bad=0
+  for s in $svcs; do
+    if ! systemctl is-active --quiet "$s" 2>/dev/null; then
+      err "$s is NOT running - diagnose: systemctl status $s  |  journalctl -u $s -n 30 --no-pager"
+      bad=1
+    fi
+  done
+  return $bad
+}
+
+web_stack_restore() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  local s
+  for s in haproxy nginx; do systemctl restart "$s" 2>/dev/null || true; done
+  web_stack_verify haproxy nginx
+}
+
 issue_ssl() {
-  local domain="$1" force="${2:-}" le_dir="/etc/letsencrypt/live/$1"
+  local domain="$1" force="${2:-}"
   ensure_dirs; mkdir -p "$CONFIG_DIR/ssl"
+  # The body stops haproxy+nginx (certbot needs port 80) and must bring
+  # them back on EVERY way out - success, failure, or interrupt - so it
+  # runs in a subshell whose EXIT trap performs the restore. The trap
+  # lives inside the subshell, so it never clobbers the calling script's
+  # own traps (install.sh and update.sh have their own EXIT traps).
+  # The explicit INT/TERM traps matter: a shell killed by Ctrl-C while
+  # it waits for certbot does NOT run its EXIT trap, so the signals get
+  # their own handlers (they run as soon as certbot's process group is
+  # gone) and the restore still happens.
+  (
+  trap 'web_stack_restore' EXIT
+  trap 'web_stack_restore; exit 130' INT
+  trap 'web_stack_restore; exit 143' TERM
+  local le_dir="/etc/letsencrypt/live/$domain"
   if command -v systemctl >/dev/null 2>&1; then
     systemctl stop haproxy nginx 2>/dev/null || true
   fi
@@ -160,10 +208,16 @@ issue_ssl() {
     echo "The ssl folder is empty - Xray/Panel will not start"
     got=""
   fi
+  # xray and the panel were never stopped - restart them so they load
+  # the fresh certificate (a real restart: try-restart would silently
+  # skip them if they happened to be down). haproxy + nginx are brought
+  # back by the EXIT trap (web_stack_restore) when this subshell ends,
+  # which also verifies they are actually active again.
   if command -v systemctl >/dev/null 2>&1; then
-    for s in haproxy nginx xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
+    for s in xray vps-panel; do systemctl restart "$s" 2>/dev/null || true; done
   fi
   [[ -n "$got" ]]
+  )
 }
 
 # --- SSL: status, re-apply, auto-renew test + renewal hook -------------------
@@ -214,8 +268,13 @@ reapply_cert() {
     err "No certificate found to re-apply (domain: '$domain')"
     return 1
   fi
+  # Real restarts, not try-restart: if one of these services is down,
+  # re-applying the cert must bring it back, not silently skip it.
+  # HAProxy is verified afterwards so a front door that stays down is
+  # reported loudly instead of looking "done".
   if command -v systemctl >/dev/null 2>&1; then
-    for s in haproxy xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
+    for s in haproxy xray vps-panel; do systemctl restart "$s" 2>/dev/null || true; done
+    web_stack_verify haproxy || true
   fi
   ssl_cert_summary
 }
@@ -225,13 +284,22 @@ ssl_dry_run() {
   # certbot's standalone authenticator needs port 80, so the web stack is
   # paused for the test and started again right after.
   command -v certbot >/dev/null 2>&1 || { err "certbot is not installed"; return 1; }
+  # Same stop/restore contract as issue_ssl: the body runs in a subshell
+  # whose EXIT trap (web_stack_restore) brings haproxy + nginx back on
+  # every exit path - the old try-restart loop below silently skipped
+  # them because they had just been stopped.
+  (
+  trap 'web_stack_restore' EXIT
+  trap 'web_stack_restore; exit 130' INT
+  trap 'web_stack_restore; exit 143' TERM
   if command -v systemctl >/dev/null 2>&1; then systemctl stop haproxy nginx 2>/dev/null || true; fi
-  local rc=0
-  certbot renew --dry-run 2>&1 | tail -n 15 || rc=$?
+  certbot renew --dry-run 2>&1 | tail -n 15
+  local rc=${PIPESTATUS[0]}
   if command -v systemctl >/dev/null 2>&1; then
-    for s in nginx haproxy xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
+    for s in xray vps-panel; do systemctl restart "$s" 2>/dev/null || true; done
   fi
-  return $rc
+  exit $rc
+  )
 }
 
 install_renewal_hook() {
@@ -256,17 +324,23 @@ cat "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" > "$SSL_DIR/combined.pem" 2>
 # then the restart below makes HAProxy serve the fresh certificate.
 cat "$SSL_DIR/fullchain.pem" "$SSL_DIR/privkey.pem" > "$SSL_DIR/haproxy.pem" 2>/dev/null || true
 chmod 600 "$SSL_DIR/haproxy.pem" 2>/dev/null || true
-for s in haproxy xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
+for s in haproxy xray vps-panel; do systemctl restart "$s" 2>/dev/null || true; done
 exit 0
 HOOK
   chmod +x "$hook" 2>/dev/null || true
 }
 
 service_status() {
-  local svc="$1"
-  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$svc" 2>/dev/null; then echo "active"; else
-    if pgrep -x "$svc" >/dev/null 2>&1; then echo "active (process)"; else echo "inactive"; fi
+  # systemctl is the ONLY source of truth, and its exact state word is
+  # what gets printed. There is deliberately NO process-name fallback:
+  # a leftover/orphaned process with the same name does not mean the
+  # service is up (an orphaned HAProxy process once made a stopped unit
+  # display as "active (process)" while port 443 was dead).
+  local svc="$1" st=""
+  if command -v systemctl >/dev/null 2>&1; then
+    st="$(systemctl is-active "$svc" 2>/dev/null || true)"
   fi
+  echo "${st:-unknown}"
 }
 
 # --- Xray service identity ---------------------------------------------------
@@ -277,6 +351,67 @@ service_status() {
 # dies at startup even though a config test run as root passes.
 # A systemd drop-in switches the service to root, which owns both paths.
 # Idempotent: the drop-in is only rewritten when its content differs.
+# --- Tunnel-only SSH accounts: shell + /etc/shells ---------------------------
+# Dropbear refuses password logins for any account whose shell is not
+# listed in /etc/shells (its log shows: User '<name>' has invalid shell,
+# rejected) - the client only sees "incorrect user name or password".
+# Every SSH account the suite creates is tunnel-only with this shell, so
+# the shell must always be a member of /etc/shells. All creation paths
+# (panel, menu, Telegram bot) use this one shell.
+TUNNEL_SHELL="/bin/false"
+SHELLS_FILE="${VPSMGR_SHELLS_FILE:-/etc/shells}"
+
+ensure_tunnel_shell() {
+  if [[ -f "$SHELLS_FILE" ]] && grep -qx "$TUNNEL_SHELL" "$SHELLS_FILE" 2>/dev/null; then
+    return 0
+  fi
+  if echo "$TUNNEL_SHELL" >> "$SHELLS_FILE" 2>/dev/null; then
+    ok "Added $TUNNEL_SHELL to $SHELLS_FILE (Dropbear rejects login shells that are not listed there)"
+    log_activity "ensure_tunnel_shell: added $TUNNEL_SHELL to $SHELLS_FILE"
+    return 0
+  fi
+  warn "Could not add $TUNNEL_SHELL to $SHELLS_FILE - Dropbear will reject SSH password logins"
+  return 1
+}
+
+# Repair accounts created before the /etc/shells fix: the panel and the
+# terminal menu used to create the system user with shell
+# /usr/sbin/nologin, which Dropbear rejects when it is not listed in
+# /etc/shells. Point every stored SSH account whose system user still has
+# a nologin shell at the tunnel shell instead. Idempotent; users that do
+# not exist on this box are skipped.
+repair_tunnel_shells() {
+  ensure_tunnel_shell || true
+  local store="$DATA_DIR/ssh_users.json" u cur fixed=0
+  [[ -f "$store" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  while IFS= read -r u; do
+    [[ -n "$u" ]] || continue
+    cur="$(getent passwd "$u" 2>/dev/null | cut -d: -f7)"
+    [[ -n "$cur" ]] || cur="$(awk -F: -v n="$u" '$1==n{print $7}' /etc/passwd 2>/dev/null)"
+    case "$cur" in
+      /usr/sbin/nologin|/sbin/nologin)
+        if usermod -s "$TUNNEL_SHELL" "$u" 2>/dev/null; then
+          ok "SSH account '$u': system shell $cur -> $TUNNEL_SHELL (Dropbear login fix)"
+          log_activity "repair_tunnel_shells: $u shell $cur -> $TUNNEL_SHELL"
+          fixed=$((fixed+1))
+        else
+          warn "SSH account '$u': could not change the system shell (still $cur)"
+        fi
+        ;;
+    esac
+  done < <(python3 -c "import json,sys
+try:
+    for r in json.load(open(sys.argv[1])):
+        print(r.get('username',''))
+except Exception:
+    pass" "$store" 2>/dev/null)
+  if [[ "$fixed" -gt 0 ]]; then
+    ok "Repaired the system shell for $fixed SSH account(s)"
+  fi
+  return 0
+}
+
 XRAY_DROPIN_DIR="${VPSMGR_XRAY_DROPIN_DIR:-/etc/systemd/system/xray.service.d}"
 XRAY_DROPIN_FILE="$XRAY_DROPIN_DIR/10-vpsmanager.conf"
 XRAY_LOG_DIR_PATH="${VPSMGR_XRAY_LOG_DIR:-/var/log/xray}"
