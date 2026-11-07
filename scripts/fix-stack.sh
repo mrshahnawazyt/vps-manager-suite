@@ -112,6 +112,21 @@ if [[ -n "$DOM_NOW" ]]; then
     fi
   fi
 fi
+# 2b) Dropbear listener config restored when it drifted - a package
+#     reinstall can reset /etc/default/dropbear to a single port, which
+#     would silently drop the extra SSH ports (143, 447). The restart
+#     loop below picks the restored config up.
+_want_db=$(cat <<'DBEOF'
+NO_START=0
+DROPBEAR_PORT=109
+DROPBEAR_EXTRA_ARGS="-p 143 -p 447"
+DROPBEAR_BANNER="/etc/vps-manager/banner.txt"
+DROPBEAR_RECEIVE_WINDOW=65536
+DBEOF
+)
+if [[ "$(cat /etc/default/dropbear 2>/dev/null)" != "$_want_db" ]]; then
+  echo "$_want_db" > /etc/default/dropbear 2>/dev/null && ok "dropbear config restored (ports 109, 143, 447)" || warn "Could not rewrite the dropbear config"
+fi
 # 3) Xray deep repair (backups + rebuild preserving accounts + verify)
 if [[ -f "$SCRIPT_DIR/scripts/fix-xray-sync.py" ]]; then
   info "Running the Xray repair (fix-xray-sync)..."

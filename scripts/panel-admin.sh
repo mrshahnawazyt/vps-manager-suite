@@ -17,7 +17,7 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 SUITE_DIR="$(dirname "$HERE")"
 DATA="${VPSMGR_DATA_DIR:-/var/lib/vps-manager}"
 UNIT=/etc/systemd/system/vps-panel.service
-RESERVED=" 22 80 109 143 443 8080 8081 8443 8444 8445 8446 8447 8448 10085 10443 18080 "
+RESERVED=" 22 80 109 143 447 443 8080 8081 8443 8444 8445 8446 8447 8448 10085 10443 18080 "
 
 panel_port(){
   local p=""
