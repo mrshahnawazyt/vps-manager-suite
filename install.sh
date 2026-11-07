@@ -143,17 +143,35 @@ if ! command -v xray >/dev/null 2>&1; then
   fi
   rm -f "$_xsh"
 fi
-mkdir -p /usr/local/etc/xray
+mkdir -p /usr/local/etc/xray /var/log/xray
+# The Xray TLS inbounds load the panel certificate files - if the SSL step
+# above did not produce them, Xray exits at once. Create a self-signed pair,
+# but only when both files are absent (a real certificate is never overwritten).
+XRAY_CERT="$CONFIG_DIR/ssl/fullchain.pem"; XRAY_KEY="$CONFIG_DIR/ssl/privkey.pem"
+if [[ ! -s "$XRAY_CERT" && ! -s "$XRAY_KEY" ]]; then
+  warn "SSL certificate files are missing - creating a self-signed pair so Xray can start"
+  mkdir -p "$CONFIG_DIR/ssl" || true
+  if openssl req -x509 -newkey rsa:2048 -keyout "$XRAY_KEY" -out "$XRAY_CERT" -days 365 -nodes -subj "/CN=$DOMAIN" >/dev/null 2>&1; then
+    chmod 600 "$XRAY_KEY" 2>/dev/null || true
+    ok "Self-signed certificate created (replace it any time from menu option 03)"
+  else
+    warn "Could not create a self-signed certificate - Xray TLS inbounds will not start until SSL is issued from menu option 03."
+  fi
+elif [[ ! -s "$XRAY_CERT" || ! -s "$XRAY_KEY" ]]; then
+  warn "The SSL certificate pair is incomplete (one file is missing) - Xray cannot start until SSL is re-issued from menu option 03."
+fi
 # Seed client: keep at least one client in every inbound (bootstrap UUID).
 # Real user accounts are added later by scripts/sync-xray.py.
 XRAY_SEED_UUID="$(gen_uuid)"
 sed "s/__DOMAIN__/$DOMAIN/g; s/__UUID__/$XRAY_SEED_UUID/g" "$SCRIPT_DIR/templates/xray.json.tpl" > /usr/local/etc/xray/config.json
 if command -v xray >/dev/null 2>&1; then
   ok "Xray binary: $(xray version 2>/dev/null | head -n1)"
-  if xray run -test -c /usr/local/etc/xray/config.json >/dev/null 2>&1; then
+  if xray run -test -config /usr/local/etc/xray/config.json >/dev/null 2>&1; then
     ok "Xray config test OK"
   else
-    err "Xray config test FAILED - run 'xray run -test -c /usr/local/etc/xray/config.json' to see the error. Common cause: missing SSL certificate files."
+    err "Xray config test FAILED - the exact error is:"
+    xray run -test -config /usr/local/etc/xray/config.json 2>&1 | tail -n 5 || true
+    warn "The seed config is in place. Fix the cause shown above, then run menu option 06 (Fix Stack) - the xray service will not start until this passes."
   fi
 else
   warn "The Xray binary was not installed - the xray service will not start. Check the internet connection and run menu option 01 again."
@@ -200,6 +218,9 @@ for svc in nginx haproxy dropbear ws-proxy vps-panel xray; do systemctl enable -
 # panel explicitly, so the new panel.py and the SSL certificate issued in this
 # install are loaded immediately (otherwise the panel stays on old code / HTTP).
 systemctl restart vps-panel 2>/dev/null && ok "vps-panel restarted (fresh code + SSL cert loaded)" || warn "vps-panel restart failed - check: systemctl status vps-panel"
+# Same for Xray: make sure the config and certificate from this install are
+# the ones actually loaded, and say so plainly if it did not come up.
+systemctl restart xray 2>/dev/null && ok "xray restarted (fresh config + certificate loaded)" || warn "xray failed to start - the exact reason is in the log: journalctl -u xray -n 20"
 
 IP=$(curl -s --max-time 5 https://api.ipify.org || ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1 || hostname -I 2>/dev/null | awk '{print $1}')
 EXPIRY_DATE=$(date -d "+365 days" +%F 2>/dev/null || echo "-")
