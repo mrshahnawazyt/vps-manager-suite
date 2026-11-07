@@ -7,9 +7,16 @@ only existed as panel records and Xray never knew them.
 
 - Template: the suite's templates/xray.json.tpl (or from /opt/vps-manager-suite)
 - __UUID__ is replaced by a bootstrap UUID (saved in bootstrap.json in the data dir)
-- Each account's UUID is added to its protocol's inbounds:
-  VLESS -> vless-ws, vless-xhttp, vless-tcp, tls-fallback
-  VMess -> vmess-ws ; Trojan -> trojan-ws (password = account id)
+- Each account's UUID is added to ALL of its protocol's inbounds:
+  VLESS  -> vless-ws, vless-xhttp, vless-xhttp-tls, vless-tcp, tls-fallback
+  VMess  -> vmess-ws, vmess-xhttp, vmess-xhttp-tls, vmess-tcp
+  Trojan -> trojan-ws, trojan-xhttp, trojan-xhttp-tls, trojan-tcp
+  (Trojan clients use password = account id.)
+- Live sync: when only the client sets changed (the inbound skeleton is
+  identical to the one the running service loaded) and the xray CLI offers
+  the HandlerService user commands (adu/rmu), accounts are added/removed
+  through the API WITHOUT a restart, so connected users stay online.
+  In every other case the config is tested and the service restarted.
 - Every client gets "email" = remark (sanitized) so Xray stats and the
   access log attribute traffic to that account (used by limit-check)
 - Expired, disabled (by limit-check) and IP-blocked accounts are skipped
@@ -117,6 +124,96 @@ def ensure_certs(cfg):
         except Exception as e:
             print(f"sync-xray: WARNING certificate creation failed: {e}")
 
+def skeleton_hash(cfg):
+    """Hash of the config with every client list emptied - identifies the
+    inbound skeleton (ports/protocols/streams) independent of accounts."""
+    import copy, hashlib
+    sk = copy.deepcopy(cfg)
+    for ib in sk.get("inbounds", []):
+        st = ib.get("settings") or {}
+        if "clients" in st:
+            st["clients"] = []
+    return hashlib.sha256(json.dumps(sk, sort_keys=True).encode()).hexdigest()
+
+
+def desired_clients(cfg):
+    """{tag: {email: client}} for all inbounds (seed clients have no email
+    and are managed by the config file itself, never through the API)."""
+    out = {}
+    for ib in cfg.get("inbounds", []):
+        m = {}
+        for c in (ib.get("settings") or {}).get("clients") or []:
+            if c.get("email"):
+                m[c["email"]] = c
+        if m:
+            out[ib.get("tag")] = m
+    return out
+
+
+def api_user_sync(xray, cfg):
+    """Reconcile live clients through the HandlerService API (adu/rmu),
+    without restarting Xray. Returns True only if every change applied."""
+    server = os.environ.get("VPSMGR_XRAY_STATS", "127.0.0.1:10085")
+    try:
+        h = subprocess.run([xray, "api", "--help"], capture_output=True, text=True, timeout=10)
+        helptext = (h.stdout or "") + (h.stderr or "")
+    except Exception:
+        return False
+    if "adu" not in helptext or "rmu" not in helptext:
+        return False
+    state_p = os.path.join(DATA_DIR, "xray_runtime.json")
+    state = load_json(state_p, {})
+    old = state.get("clients") or {}
+    new = desired_clients(cfg)
+    changes = []
+    for tag in set(old) | set(new):
+        o, n = old.get(tag, {}), new.get(tag, {})
+        for em in o:
+            if em not in n:
+                changes.append(("rmu", tag, em, None))
+        for em in n:
+            if em not in o:
+                changes.append(("adu", tag, em, n[em]))
+    tmpd = None
+    try:
+        for op, tag, em, client in changes:
+            if op == "rmu":
+                r = subprocess.run([xray, "api", "rmu", "-server=" + server, "-tag", tag, em],
+                                   capture_output=True, text=True, timeout=15)
+            else:
+                if tmpd is None:
+                    import tempfile
+                    tmpd = tempfile.mkdtemp(prefix="vpsm-api-")
+                fp = os.path.join(tmpd, "user.json")
+                with open(fp, "w") as f:
+                    json.dump(client, f)
+                r = subprocess.run([xray, "api", "adu", "-server=" + server, "-tag", tag, fp],
+                                   capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                print("sync-xray: live API %s failed for %s/%s - falling back to restart" % (op, tag, em))
+                return False
+    except Exception as e:
+        print("sync-xray: live API sync error: %s - falling back to restart" % e)
+        return False
+    state["clients"] = new
+    try:
+        with open(state_p, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+    print("sync-xray: live API sync applied %d client change(s), no restart" % len(changes))
+    return True
+
+
+def save_runtime(skeleton, clients):
+    state_p = os.path.join(DATA_DIR, "xray_runtime.json")
+    try:
+        with open(state_p, "w") as f:
+            json.dump({"skeleton": skeleton, "clients": clients}, f, indent=2)
+    except Exception:
+        pass
+
+
 def main():
     tpl_path = next((p for p in TPL_CANDIDATES if p and os.path.exists(p)), "")
     if not tpl_path:
@@ -139,9 +236,9 @@ def main():
         email = stats_email(a)
         proto = (a.get("protocol") or "").lower()
         targets = []
-        if proto == "vless": targets = ["vless-ws", "vless-xhttp", "vless-tcp", "tls-fallback"]
-        elif proto == "vmess": targets = ["vmess-ws"]
-        elif proto == "trojan": targets = ["trojan-ws"]
+        if proto == "vless": targets = ["vless-ws", "vless-xhttp", "vless-xhttp-tls", "vless-tcp", "tls-fallback"]
+        elif proto == "vmess": targets = ["vmess-ws", "vmess-xhttp", "vmess-xhttp-tls", "vmess-tcp"]
+        elif proto == "trojan": targets = ["trojan-ws", "trojan-xhttp", "trojan-xhttp-tls", "trojan-tcp"]
         for tag in targets:
             ib = by_tag.get(tag)
             if not ib: continue
@@ -188,8 +285,17 @@ def main():
         else:
             print("sync-xray: xray config test OK")
     if "--restart" in sys.argv and os.path.exists("/run/systemd/system"):
-        subprocess.run(["systemctl", "restart", "xray"], capture_output=True)
-        print("sync-xray: xray restart attempted")
+        state = load_json(os.path.join(DATA_DIR, "xray_runtime.json"), {})
+        applied = cfg if rc == 0 else seed_cfg
+        live = False
+        if rc == 0 and xray and state.get("skeleton") == skeleton_hash(cfg):
+            act = subprocess.run(["systemctl", "is-active", "--quiet", "xray"], capture_output=True)
+            if act.returncode == 0:
+                live = api_user_sync(xray, cfg)
+        if not live:
+            subprocess.run(["systemctl", "restart", "xray"], capture_output=True)
+            print("sync-xray: xray restart attempted")
+            save_runtime(skeleton_hash(applied), desired_clients(applied) if rc == 0 else {})
     return rc
 
 if __name__ == "__main__":

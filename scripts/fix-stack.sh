@@ -81,7 +81,78 @@ if command -v xray >/dev/null 2>&1 && [[ -f "$XRAY_CFG" ]]; then
     fi
   fi
 fi
-for svc in nginx haproxy xray dropbear ws-proxy vps-panel; do
+# --- Component repair (beyond restarts) --------------------------------------
+# 1) Missing base packages are reinstalled (xray has its own installer -
+#    a missing xray binary is reported, not apt-installed)
+for pair in "nginx:nginx" "haproxy:haproxy" "dropbear:dropbear" "certbot:certbot"; do
+  _bin="${pair%%:*}"; _pkg="${pair##*:}"
+  if ! command -v "$_bin" >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    warn "Package missing: $_pkg - installing..."
+    apt-get install -y "$_pkg" >/dev/null 2>&1 && ok "$_pkg installed" || warn "$_pkg install failed - check the network/apt sources"
+  fi
+done
+command -v xray >/dev/null 2>&1 || warn "The Xray binary is missing - run menu option 01 (Install All) to install it."
+# 2) Router configs are re-rendered from the templates when they drifted
+DOM_NOW=""
+if declare -F get_domain >/dev/null 2>&1; then DOM_NOW="$(get_domain 2>/dev/null || true)"; fi
+[[ -z "$DOM_NOW" && -f "${DATA_DIR:-/var/lib/vps-manager}/config.json" ]] && DOM_NOW=$(python3 -c "import json;print(json.load(open('${DATA_DIR:-/var/lib/vps-manager}/config.json')).get('domain',''))" 2>/dev/null || echo "")
+if [[ -n "$DOM_NOW" ]]; then
+  if [[ -f "$SCRIPT_DIR/templates/nginx.conf.tpl" ]]; then
+    _want=$(sed "s/__DOMAIN__/$DOM_NOW/g; s/__PANEL_PORT__/9090/g" "$SCRIPT_DIR/templates/nginx.conf.tpl")
+    if [[ "$_want" != "$(cat /etc/nginx/nginx.conf 2>/dev/null)" ]]; then
+      echo "$_want" > /etc/nginx/nginx.conf 2>/dev/null && ok "nginx router re-rendered from the template" || warn "Could not rewrite the nginx config"
+    fi
+  fi
+  if [[ -f "$SCRIPT_DIR/templates/haproxy.cfg.tpl" && -d /etc/haproxy ]]; then
+    _want=$(sed "s/__DOMAIN__/$DOM_NOW/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl")
+    if [[ "$_want" != "$(cat /etc/haproxy/haproxy.cfg 2>/dev/null)" ]]; then
+      echo "$_want" > /etc/haproxy/haproxy.cfg 2>/dev/null && ok "haproxy config re-rendered from the template" || warn "Could not rewrite the haproxy config"
+    fi
+  fi
+fi
+# 3) Xray deep repair (backups + rebuild preserving accounts + verify)
+if [[ -f "$SCRIPT_DIR/scripts/fix-xray-sync.py" ]]; then
+  info "Running the Xray repair (fix-xray-sync)..."
+  python3 "$SCRIPT_DIR/scripts/fix-xray-sync.py" --no-restart 2>&1 | tail -n 8 || true
+fi
+# 4) Installed service files + units are refreshed from this suite
+install -m 755 "$SCRIPT_DIR/web/panel.py" /usr/local/bin/vps-panel.py 2>/dev/null || true
+install -m 755 "$SCRIPT_DIR/scripts/ws-proxy.py" /usr/local/bin/vps-ws-proxy.py 2>/dev/null || true
+if [[ ! -f /etc/systemd/system/vps-monitor.service ]]; then
+  cat > /etc/systemd/system/vps-monitor.service <<EOF
+[Unit]
+Description=VPS Manager Suite - Limit Monitor
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=$SCRIPT_DIR
+Environment=VPSMGR_DATA_DIR=${DATA_DIR:-/var/lib/vps-manager}
+ExecStart=/usr/bin/python3 $SCRIPT_DIR/scripts/monitor.py
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+  ok "vps-monitor.service created (was missing)"
+fi
+if [[ ! -f /etc/systemd/system/vps-bot.service ]]; then
+  cat > /etc/systemd/system/vps-bot.service <<EOF
+[Unit]
+Description=VPS Manager Suite - Telegram Bot
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=/usr/bin/python3 $SCRIPT_DIR/scripts/telegram-bot.py
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+EOF
+  ok "vps-bot.service created (was missing)"
+fi
+systemctl daemon-reload 2>/dev/null || true
+for svc in nginx haproxy xray dropbear ws-proxy vps-panel vps-monitor; do
   if command -v systemctl >/dev/null 2>&1; then systemctl restart "$svc" 2>/dev/null && ok "$svc restarted" || warn "$svc restart skipped/failed"; fi
 done
 print_ports
@@ -96,10 +167,22 @@ svc_state(){
 echo "$BOX_EDGE"
 box_title "SERVICE STATUS"
 echo "$BOX_EDGE"
-for svc in nginx haproxy xray dropbear ws-proxy vps-panel; do
+for svc in nginx haproxy xray dropbear ws-proxy vps-panel vps-monitor vps-bot; do
   box_line "$svc : $(svc_state "$svc")"
 done
 _xray_state="$(svc_state xray)"
+# Self-heal retry: if Xray is still down, rebuild + restart it once more
+if [[ "$_xray_state" == "failed" || "$_xray_state" == "inactive" ]] && command -v systemctl >/dev/null 2>&1; then
+  warn "Xray is still down - one self-heal retry (cert check + config rebuild + restart)..."
+  ensure_xray_certs || true
+  [[ -f "$SCRIPT_DIR/scripts/sync-xray.py" ]] && python3 "$SCRIPT_DIR/scripts/sync-xray.py" >/dev/null 2>&1 || true
+  systemctl restart xray 2>/dev/null || true
+  sleep 1
+  _xray_state="$(svc_state xray)"
+  echo "$BOX_EDGE"
+  box_line "xray after retry : $_xray_state"
+  echo "$BOX_EDGE"
+fi
 if [[ "$_xray_state" == "failed" || "$_xray_state" == "inactive" ]] && command -v journalctl >/dev/null 2>&1; then
   box_line "Xray is not running - last log lines:"
   journalctl -u xray -n 5 --no-pager -o cat 2>/dev/null | while IFS= read -r _l; do
