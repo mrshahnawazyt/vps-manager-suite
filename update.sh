@@ -62,10 +62,24 @@ done
 printf '#!/usr/bin/env bash\nexec bash %s/update.sh "$@"\n' "$SUITE_DIR" > /usr/local/bin/vpsupdate
 chmod +x /usr/local/bin/vpsupdate
 
+# Apply service-level fixes from the NEW code before restarting anything:
+# the stock Xray unit runs as User=nobody, which cannot read the suite's
+# TLS private key (mode 600) or write its access log, so Xray dies at
+# startup. ensure_xray_service (from the updated lib/common.sh) installs
+# the systemd drop-in that runs Xray as root and reloads systemd.
+if [[ -f "$SUITE_DIR/lib/common.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$SUITE_DIR/lib/common.sh" 2>/dev/null || true
+fi
+if declare -F ensure_xray_service >/dev/null 2>&1; then
+  ensure_xray_service || echo "[update] Warning: the Xray service drop-in could not be installed."
+fi
+
 # Restart the services (where present)
 if command -v systemctl >/dev/null 2>&1; then
   systemctl restart vps-panel 2>/dev/null || true
   systemctl restart ws-proxy 2>/dev/null || true
+  systemctl restart xray 2>/dev/null || true
 fi
 
 echo "UPDATE OK - the latest version of VPS Manager Suite is installed. Panel: systemctl status vps-panel"

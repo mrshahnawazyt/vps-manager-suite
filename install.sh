@@ -176,6 +176,11 @@ if command -v xray >/dev/null 2>&1; then
 else
   warn "The Xray binary was not installed - the xray service will not start. Check the internet connection and run menu option 01 again."
 fi
+# The stock Xray unit runs as User=nobody, which cannot read the private
+# key above (mode 600) or write /var/log/xray/access.log - the config test
+# passes as root but the service would die at startup. Install the drop-in
+# that runs the service as root BEFORE the service is started in step 12.
+ensure_xray_service || warn "The Xray service drop-in could not be installed - Xray may fail to start; run menu option 06 (Fix Stack)."
 # Xray paths: VMess /vmess (10001), VLESS /vless (10002), Trojan /trojan (10003), XHTTP /xhttp (10004), TLS fallback 10443, VLESS TCP 8443
 
 # 9) CAKE QoS
@@ -220,7 +225,11 @@ for svc in nginx haproxy dropbear ws-proxy vps-panel xray; do systemctl enable -
 systemctl restart vps-panel 2>/dev/null && ok "vps-panel restarted (fresh code + SSL cert loaded)" || warn "vps-panel restart failed - check: systemctl status vps-panel"
 # Same for Xray: make sure the config and certificate from this install are
 # the ones actually loaded, and say so plainly if it did not come up.
-systemctl restart xray 2>/dev/null && ok "xray restarted (fresh config + certificate loaded)" || warn "xray failed to start - the exact reason is in the log: journalctl -u xray -n 20"
+systemctl restart xray 2>/dev/null && ok "xray restarted (fresh config + certificate loaded)" || warn "xray restart command failed - check: systemctl status xray"
+# Final health check: a successful restart command does not prove the
+# service stayed up (it can die a second later on a bad config or an
+# unreadable key) - verify the real state and show the log if it is down.
+verify_xray_running || true
 
 IP=$(curl -s --max-time 5 https://api.ipify.org || ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1 || hostname -I 2>/dev/null | awk '{print $1}')
 EXPIRY_DATE=$(date -d "+365 days" +%F 2>/dev/null || echo "-")
