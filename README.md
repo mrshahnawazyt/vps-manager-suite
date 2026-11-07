@@ -4,7 +4,7 @@
 
 Everything is controlled from three places with the same power: the **terminal menu**, the **web panel**, and a **Telegram bot** that works as a full remote panel.
 
-![Ubuntu](https://img.shields.io/badge/Ubuntu-20.04%20--%2025.x-orange)
+![Ubuntu](https://img.shields.io/badge/Ubuntu-18.04%20--%2025.x-orange)
 ![Shell](https://img.shields.io/badge/Shell-Bash-green)
 ![Panel](https://img.shields.io/badge/Panel-Python%20(stdlib%20only)-blue)
 ![Status](https://img.shields.io/badge/Status-Feature--Parity%20Build-brightgreen)
@@ -48,7 +48,7 @@ The script asks for your domain itself. After the install, use `vpsmenu` for the
 
 | Item | Detail |
 |---|---|
-| OS | Ubuntu 20.04 / 22.04 / 24.04 / 25.x (a fresh VPS is best) |
+| OS | Ubuntu 18.04 / 20.04 / 22.04 / 24.04 / 25.x (a fresh VPS is best) |
 | Access | root (sudo) |
 | RAM | 1 GB+ recommended |
 | Domain | A domain/subdomain whose **A record points to the VPS IP** (needed for SSL) |

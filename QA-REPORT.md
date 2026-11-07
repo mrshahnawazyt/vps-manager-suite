@@ -2,6 +2,31 @@
 
 Local QA by the maintainer's test environment (Ubuntu 24.04, Python 3.12).
 Rule applied throughout: **build properly, test locally first, push only after tests pass.**
+Supported range: **Ubuntu 18.04 – 25.x** (18.04 support is code-audited — see the audit section below; it has not been boot-tested on real 18.04 hardware/VM in this environment).
+
+## Ubuntu 18.04 Compatibility Audit (2026-11-07) — PASS (code-audited)
+
+Goal: extend the supported range down to Ubuntu 18.04 (Python 3.6.9, bash 4.4,
+HAProxy 1.8, nginx 1.14, kernel 4.15 stock / 5.4 HWE).
+
+| Check | Result |
+|---|---|
+| Every `.py` parsed with a Python 3.6 grammar (`feature_version=(3,6)`) | **PASS** (all files) |
+| `subprocess` `capture_output=` / `text=` (3.7+) removed — 28 call sites converted to `stdout=PIPE, stderr=PIPE` / `universal_newlines=True` | **PASS** |
+| `datetime.fromisoformat` (3.7+) removed — replaced by strptime-based helpers, verified value-for-value against `fromisoformat` on suite timestamp formats | **PASS** |
+| `http.server.ThreadingHTTPServer` (3.7+) — panel now builds the identical class from `ThreadingMixIn` on 3.6 | **PASS** |
+| Shell scripts swept for bash 5+ idioms (none found; `mapfile` etc. are bash 4.x) | **PASS** |
+| Every core package exists on Ubuntu 18.04 (bionic); `stunnel4` / `speedtest-cli` stay optional-skip | **PASS** |
+| HAProxy template uses only directives available in HAProxy 1.8; nginx template has no directive newer than nginx 1.14 | **PASS** |
+| CAKE on stock 18.04 (kernel 4.15, no `sch_cake`): QoS now falls back to `fq_codel` with a clear message and HWE instructions instead of printing raw tc errors or a false success | **PASS** |
+| `check_os()` accepts 18.04 as supported (with the CAKE/HWE note); warns only below 18.04 | **PASS** |
+| Panel smoke test + `vpsm.py` account sanity after the changes | **PASS** |
+
+Honest limits: no real Ubuntu 18.04 boot test was possible in the QA
+environment, so 18.04 support is **code-audited, not live-verified**. Residual
+risks: certbot on 18.04 is 0.31 (older CLI behaviour around renewals), HAProxy
+1.8 / nginx 1.14 runtime quirks, the current Xray release's behaviour on an
+18.04 userland, and CAKE requiring the HWE kernel on 18.04.
 
 ## Feature-Parity Build (2026-11-07) — PASS
 

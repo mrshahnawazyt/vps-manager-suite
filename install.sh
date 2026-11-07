@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VPS Manager Suite v1.0 - Installer (ORIGINAL code, Ubuntu 20.04 - 25.x)
+# VPS Manager Suite v1.0 - Installer (ORIGINAL code, Ubuntu 18.04 - 25.x)
 # Features: Dropbear, ws-proxy, Nginx internal router, HAProxy 80/443 mux,
 #           Xray (VMess/VLESS/Trojan, WS/TLS/TCP/XHTTP), CAKE QoS, SSL, Web Panel 9090
 # Limit rule (corrected, video-verified): Days = literal (default 30, Expiry = creation + Days). 0 = Unlimited applies only to the GB limit and the IP limit.
@@ -48,7 +48,7 @@ apt-get update -y
 # Note: ufw is intentionally NOT installed - the installer does not enable a
 # firewall, which avoids any risk of ports like 9090/443 being blocked.
 # openssl is required (self-signed fallback and certs for Xray/Panel).
-# Core packages: available on every supported Ubuntu (20.04 - 25.x).
+# Core packages: available on every supported Ubuntu (18.04 - 25.x).
 apt-get install -y curl wget unzip jq nginx haproxy dropbear certbot python3 python3-pip iproute2 openssl uuid-runtime cron
 # Optional packages: names/availability differ on some versions -
 # if one is not found, skip it; the rest of the install must not stop.
