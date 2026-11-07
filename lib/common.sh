@@ -19,23 +19,23 @@ err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 banner(){ echo -e "${BLUE}==============================================${NC}"; echo -e "  $*"; echo -e "${BLUE}==============================================${NC}"; }
 
 require_root() {
-  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then err "Root chahiye. sudo ke saath chalao: sudo bash $0"; exit 1; fi
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then err "Root is required. Run with sudo: sudo bash $0"; exit 1; fi
 }
 
 check_os() {
-  if [[ -f /etc/os-release ]]; then . /etc/os-release; else err "OS detect nahi hua"; exit 1; fi
+  if [[ -f /etc/os-release ]]; then . /etc/os-release; else err "Could not detect the OS"; exit 1; fi
   if [[ "${ID:-}" != "ubuntu" ]]; then
-    warn "Ye installer Ubuntu ke liye hai"
-    warn "Current: ${PRETTY_NAME:-unknown}"
-    warn "Koshish jaari hai — kuch steps fail"
-    warn "ho sakte hain."
+    warn "This installer is made for Ubuntu"
+    warn "Detected: ${PRETTY_NAME:-unknown}"
+    warn "Continuing anyway - some steps"
+    warn "may fail."
     return 0
   fi
   local major="${VERSION_ID%%.*}"
   if [[ "$major" =~ ^[0-9]+$ ]] && (( major < 20 )); then
-    warn "Ubuntu $VERSION_ID purana hai"
-    warn "20.04 se pehle ke versions par kuch"
-    warn "packages nahi milenge."
+    warn "Ubuntu $VERSION_ID is very old"
+    warn "Versions older than 20.04 may be"
+    warn "missing some packages."
   else
     info "OS: Ubuntu ${VERSION_ID} (supported)"
   fi
@@ -82,18 +82,18 @@ dns_check() {
   echo "Domain    : $domain -> ${resolved:-not resolved}"
   if [[ -n "$ip" && -n "$resolved" && "$ip" != "$resolved" ]]; then
     warn "DNS mismatch!"
-    warn "A record ko is IP par point karo:"
-    echo "  $ip  (warna SSL fail hoga)"
+    warn "Point the A record to this IP:"
+    echo "  $ip  (otherwise SSL will fail)"
     return 1
   fi
-  [[ -n "$resolved" ]] && ok "DNS sahi lag raha hai." || warn "Domain abhi resolve nahi ho raha."
+  [[ -n "$resolved" ]] && ok "DNS looks correct." || warn "The domain is not resolving yet."
   return 0
 }
 
-# --- SSL: Let's Encrypt (standalone, port 80) ya self-signed fallback -------
-# HTTP-01 ke liye port 80 khaali chahiye, is liye certbot se pehle nginx/haproxy
-# rokte hain aur baad me dobara start karte hain. (Purana --http-01-port 8899 wala
-# tareeqa kaam nahi karta tha — ACME hamesha port 80 par aata hai.)
+# --- SSL: Let's Encrypt (standalone, port 80) or self-signed fallback -------
+# HTTP-01 needs port 80 free, so nginx/haproxy are stopped before certbot runs
+# and started again afterwards. (The old --http-01-port 8899 approach never
+# worked - ACME always arrives on port 80.)
 issue_ssl() {
   local domain="$1" le_dir="/etc/letsencrypt/live/$1"
   ensure_dirs; mkdir -p "$CONFIG_DIR/ssl"
@@ -110,23 +110,23 @@ issue_ssl() {
     fi
   fi
   if [[ -z "$got" ]]; then
-    warn "Let's Encrypt nahi mila (DNS/port 80)"
-    warn "Self-signed fallback ban raha hai"
+    warn "Let's Encrypt failed (DNS/port 80)"
+    warn "Creating a self-signed fallback"
     if command -v openssl >/dev/null 2>&1; then
       openssl req -x509 -newkey rsa:2048 -keyout "$CONFIG_DIR/ssl/privkey.pem" \
         -out "$CONFIG_DIR/ssl/fullchain.pem" -days 365 -nodes -subj "/CN=$domain" >/dev/null 2>&1 || true
     fi
     got="self-signed"
   fi
-  # Verify: dono files maujood + non-empty honi chahiye, warna Xray/Panel start nahi honge
+  # Verify: both files must exist and be non-empty, otherwise Xray/Panel will not start
   if [[ -s "$CONFIG_DIR/ssl/fullchain.pem" && -s "$CONFIG_DIR/ssl/privkey.pem" ]]; then
     chmod 600 "$CONFIG_DIR/ssl/privkey.pem" 2>/dev/null || true
     cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
     ok "SSL ready ($got)"
     echo "Cert: $CONFIG_DIR/ssl/fullchain.pem"
   else
-    err "SSL FAIL: cert files nahi bani!"
-    echo "ssl folder khaali - Xray/Panel start nahi honge"
+    err "SSL FAILED: certificate files were not created!"
+    echo "The ssl folder is empty - Xray/Panel will not start"
     got=""
   fi
   if command -v systemctl >/dev/null 2>&1; then
@@ -144,7 +144,7 @@ service_status() {
 
 print_ports() {
   echo "--- Listening Ports ---"
-  if command -v ss >/dev/null 2>&1; then ss -tulnp 2>/dev/null | head -n 60; else netstat -tulnp 2>/dev/null | head -n 60 || echo "ss/netstat nahi mila"; fi
+  if command -v ss >/dev/null 2>&1; then ss -tulnp 2>/dev/null | head -n 60; else netstat -tulnp 2>/dev/null | head -n 60 || echo "ss/netstat not found"; fi
 }
 
 is_port_listening() { ss -tuln 2>/dev/null | grep -q ":$1 " || netstat -tuln 2>/dev/null | grep -q ":$1 "; }
