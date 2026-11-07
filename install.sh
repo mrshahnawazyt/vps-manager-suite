@@ -8,15 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- Single-file bootstrap (same style as the video) ---
 # If only install.sh was downloaded (no lib/ folder next to it), download the
 # remaining files from the GitHub repo and re-run this installer.
-# Usage: export GH_REPO=username/repo-name [GH_TOKEN=xxx for a private repo]
-#        curl -fsSL https://raw.githubusercontent.com/username/repo-name/main/install.sh -o install.sh && bash install.sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/mrshahnawazyt/vps-manager-suite/main/install.sh -o install.sh && bash install.sh
+# GH_REPO defaults to this suite's own repo (mrshahnawazyt/vps-manager-suite);
+# override with: export GH_REPO=username/repo-name [GH_TOKEN=xxx for a private repo]
 if [[ ! -f "$SCRIPT_DIR/lib/common.sh" ]]; then
-  if [[ -z "${GH_REPO:-}" ]]; then
-    echo "Only install.sh was found. Set GH_REPO, e.g.:"
-    echo "  export GH_REPO=username/repo-name"
-    echo "or upload the full project folder to the VPS and run it from there."
-    exit 1
-  fi
+  GH_REPO="${GH_REPO:-mrshahnawazyt/vps-manager-suite}"
   echo "Downloading the remaining files from the GitHub repo ($GH_REPO)..."
   _tmp="$(mktemp -d)"; mkdir -p "$_tmp/src"
   _auth=(); [[ -n "${GH_TOKEN:-}" ]] && _auth=(-H "Authorization: token $GH_TOKEN")
