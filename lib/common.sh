@@ -24,7 +24,21 @@ require_root() {
 
 check_os() {
   if [[ -f /etc/os-release ]]; then . /etc/os-release; else err "OS detect nahi hua"; exit 1; fi
-  if [[ "${ID:-}" != "ubuntu" ]]; then warn "Ye installer Ubuntu 22.04 ke liye optimized hai. Current: ${PRETTY_NAME:-unknown}"; fi
+  if [[ "${ID:-}" != "ubuntu" ]]; then
+    warn "Ye installer Ubuntu ke liye hai"
+    warn "Current: ${PRETTY_NAME:-unknown}"
+    warn "Koshish jaari hai — kuch steps fail"
+    warn "ho sakte hain."
+    return 0
+  fi
+  local major="${VERSION_ID%%.*}"
+  if [[ "$major" =~ ^[0-9]+$ ]] && (( major < 20 )); then
+    warn "Ubuntu $VERSION_ID purana hai"
+    warn "20.04 se pehle ke versions par kuch"
+    warn "packages nahi milenge."
+  else
+    info "OS: Ubuntu ${VERSION_ID} (supported)"
+  fi
 }
 
 gen_password() { head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16; echo; }
@@ -67,7 +81,9 @@ dns_check() {
   echo "Server IP : ${ip:-unknown}"
   echo "Domain    : $domain -> ${resolved:-not resolved}"
   if [[ -n "$ip" && -n "$resolved" && "$ip" != "$resolved" ]]; then
-    warn "DNS mismatch! Domain ka A record is server IP ($ip) par point karo, warna SSL fail hoga."
+    warn "DNS mismatch!"
+    warn "A record ko is IP par point karo:"
+    echo "  $ip  (warna SSL fail hoga)"
     return 1
   fi
   [[ -n "$resolved" ]] && ok "DNS sahi lag raha hai." || warn "Domain abhi resolve nahi ho raha."
@@ -94,7 +110,8 @@ issue_ssl() {
     fi
   fi
   if [[ -z "$got" ]]; then
-    warn "Let's Encrypt nahi mila (DNS/port 80 check karo) — self-signed fallback bana raha hoon."
+    warn "Let's Encrypt nahi mila (DNS/port 80)"
+    warn "Self-signed fallback ban raha hai"
     if command -v openssl >/dev/null 2>&1; then
       openssl req -x509 -newkey rsa:2048 -keyout "$CONFIG_DIR/ssl/privkey.pem" \
         -out "$CONFIG_DIR/ssl/fullchain.pem" -days 365 -nodes -subj "/CN=$domain" >/dev/null 2>&1 || true
@@ -105,9 +122,11 @@ issue_ssl() {
   if [[ -s "$CONFIG_DIR/ssl/fullchain.pem" && -s "$CONFIG_DIR/ssl/privkey.pem" ]]; then
     chmod 600 "$CONFIG_DIR/ssl/privkey.pem" 2>/dev/null || true
     cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
-    ok "SSL ready ($got): $CONFIG_DIR/ssl/fullchain.pem"
+    ok "SSL ready ($got)"
+    echo "Cert: $CONFIG_DIR/ssl/fullchain.pem"
   else
-    err "SSL FAIL: cert files nahi bani! $CONFIG_DIR/ssl/ khaali hai — Xray aur Panel (HTTPS) start nahi honge."
+    err "SSL FAIL: cert files nahi bani!"
+    echo "ssl folder khaali - Xray/Panel start nahi honge"
     got=""
   fi
   if command -v systemctl >/dev/null 2>&1; then
