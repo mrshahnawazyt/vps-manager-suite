@@ -32,8 +32,21 @@ http {
     set_real_ip_from 2405:8100::/32;
     set_real_ip_from 2a06:98c0::/29;
     set_real_ip_from 2c0f:f9d8::/32;
+    # HAProxy terminates TLS on 443 and passes connections on from
+    # loopback - trust it as a hop so a Cloudflare chain that arrives
+    # THROUGH HAProxy still restores the visitor IP from CF-Connecting-IP.
+    set_real_ip_from 127.0.0.1;
     real_ip_header CF-Connecting-IP;
     real_ip_recursive on;
+    # Real client IP for the /sshws location: on port 80 $remote_addr IS
+    # the client already; behind HAProxy (443) it is 127.0.0.1 and the
+    # client IP travels in X-Forwarded-For, which HAProxy itself sets to
+    # the connection source (unspoofable past HAProxy). ws-proxy needs
+    # the real IP for its per-IP connection log / IP limits.
+    map $remote_addr $ssh_client_ip {
+        127.0.0.1   $http_x_forwarded_for;
+        default     $remote_addr;
+    }
     # Internal router - only HAProxy/Xray traffic reaches here
     server {
         listen 127.0.0.1:18080;
@@ -46,7 +59,9 @@ http {
         location /xhttp-vmess { proxy_pass http://127.0.0.1:10005; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }
         location /xhttp-trojan { proxy_pass http://127.0.0.1:10006; proxy_http_version 1.1; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; }
         # SSH-WS: SSH account payloads arrive on this path (/sshws) -> ws-proxy (__WSPROXY_PORT__) -> Dropbear (109)
-        location /sshws { proxy_pass http://127.0.0.1:__WSPROXY_PORT__; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $remote_addr; proxy_read_timeout 3600s; }
+        # proxy_buffering MUST stay off here: this location is a raw tunnel - with buffering on, nginx
+        # holds the SSH banner (and small packets) in its buffers and payload-mode clients see nothing.
+        location /sshws { proxy_pass http://127.0.0.1:__WSPROXY_PORT__; proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; proxy_set_header Host $host; proxy_set_header X-Real-IP $ssh_client_ip; proxy_set_header X-Forwarded-For $ssh_client_ip; proxy_read_timeout 3600s; proxy_buffering off; }
         location / { return 200 "VPS Manager Suite - OK\n"; add_header Content-Type text/plain; }
     }
 }
