@@ -717,6 +717,7 @@ class Handler(BaseHTTPRequestHandler):
             <div class='grid'>
             <div class='card'><h3>Accounts</h3><p>SSH Accounts: <b>{len(ssh)}</b><br>Xray Accounts: <b>{len(xr)}</b></p><p><a class='btn ghost small' href='/ssh'>SSH Accounts</a> <a class='btn ghost small' href='/xray'>Xray Accounts</a></p></div>
             <div class='card'><h3>Network</h3><p>Download (RX): <b>{s.get('net_rx_gb')} GB</b><br>Upload (TX): <b>{s.get('net_tx_gb')} GB</b></p><p class='mut'>Uptime: {html.escape(s.get('uptime',''))}</p></div>
+            <div class='card'><h3>Python Proxy</h3><p>{chip(next((x['status'] for x in svcs if x['name'] == 'ws-proxy'), 'unknown'))}<br><span class='mut'>WebSocket port <b>{to_int(cfg.get('ws_proxy_port', 8080), 8080)}</b> · PROXY port <b>{to_int(cfg.get('ws_proxy_port', 8080), 8080) + 1}</b></span></p><p><a class='btn ghost small' href='/services'>Manage Python Proxy</a></p></div>
             <div class='card'><h3>Server Info</h3><div class='kv'><div><div class='k'>Domain</div><div class='v'>{html.escape(domain) or '-'}</div></div><div><div class='k'>Panel Port</div><div class='v'>{PORT}</div></div><div><div class='k'>Hostname</div><div class='v'>{html.escape(os.uname().nodename)}</div></div><div><div class='k'>OS</div><div class='v'>{html.escape(os.uname().sysname)} {html.escape(os.uname().release)}</div></div></div></div>
             </div>
             <div class='card'><h3>Services Status</h3>{svc_rows}</div>"""
@@ -787,7 +788,32 @@ class Handler(BaseHTTPRequestHandler):
                            f"<button class='small ghost' name='op' value='start'>Start</button> <button class='small ghost' name='op' value='stop'>Stop</button> <button class='small ghost' name='op' value='restart'>Restart</button></form> "
                            f"<a class='btn ghost small' href='/services/logs?name={n}'>Logs</a>")
                 return f"<div class='svcrow'><span>{n}</span><span>{chip(x['status'])} {ctl}</span></div>"
-            rows = "".join(_svc_row(x) for x in service_list())
+            _svcs = service_list()
+            rows = "".join(_svc_row(x) for x in _svcs)
+            # --- Python Proxy card: the ws-proxy service under its product name,
+            # with streamed controls (Start/Stop/Restart/Force) and a port setting.
+            _ws_st = next((x["status"] for x in _svcs if x["name"] == "ws-proxy"), "unknown")
+            _ws_port = to_int(load_config().get("ws_proxy_port", 8080), 8080)
+            if not (1 <= _ws_port <= 65534): _ws_port = 8080
+            _py_btns = ""
+            if role_at_least(role, "admin"):
+                def _py_form(job, label, cls="small ghost", confirm=""):
+                    oc = f" onsubmit=\"return confirm('{confirm}')\"" if confirm else ""
+                    return (f"<form method='post' action='/action/run' style='display:inline'{oc}>"
+                            f"<input type='hidden' name='job' value='{job}'><button class='{cls}'>{label}</button></form> ")
+                _py_btns = ("<p style='margin:12px 0 4px'>"
+                            + _py_form("pyproxy-start", "Start") + _py_form("pyproxy-stop", "Stop") + _py_form("pyproxy-restart", "Restart")
+                            + _py_form("pyproxy-force-start", "Force Start", "danger", "Force Start kills anything still holding the proxy ports and starts the Python Proxy. Continue?")
+                            + _py_form("pyproxy-force-stop", "Force Stop", "danger", "Force Stop kills anything still holding the proxy ports and leaves the Python Proxy OFF. Continue?")
+                            + "</p>"
+                            f"<form method='post' action='/action/run' style='margin-top:10px'><input type='hidden' name='job' value='pyproxy-setport'>"
+                            f"<label>Proxy port (the PROXY-protocol listener uses port + 1)</label>"
+                            f"<input name='port' type='number' min='1' max='65535' value='{_ws_port}' style='width:130px;display:inline-block;margin-right:6px'>"
+                            f"<button class='small'>Set Port</button></form>")
+            pyproxy = (f"<div class='card'><h3>Python Proxy</h3>"
+                       f"<div class='svcrow'><span>ws-proxy service · WebSocket port <b>{_ws_port}</b> · PROXY-protocol port <b>{_ws_port + 1}</b></span>{chip(_ws_st)}</div>"
+                       f"<p class='mut' style='margin-top:8px'>The Python proxy accepts SSH-over-WebSocket connections (path /sshws) and relays them to Dropbear. "
+                       f"Start / Stop / Restart / Force run with live output. Force is the heavy hand for when a normal start or stop does not work.</p>{_py_btns}</div>")
             ports = subprocess.getoutput("ss -tuln 2>/dev/null | head -n 40") if shutil.which("ss") else "ss is not available (local dev environment)"
             stack = ""
             if role_at_least(role, "admin"):
@@ -797,7 +823,7 @@ class Handler(BaseHTTPRequestHandler):
                          "<form method='post' action='/action/run' style='display:inline'><input type='hidden' name='job' value='xray'><button class='ghost'>Repair Xray Sync</button></form> "
                          "<form method='post' action='/action/run' style='display:inline'><input type='hidden' name='job' value='ssl'><button class='ghost'>Issue / Renew SSL</button></form> "
                          "<form method='post' action='/action/restart-all' style='display:inline'><button class='ghost'>Restart All Services</button></form></div>")
-            return self.send_html(page("Running Services", f"<div class='card'><h3>Running Services</h3>{rows}</div>{stack}<div class='card'><h3>Listening Ports</h3><pre class='raw'>{html.escape(ports)}</pre></div>", active="/services", user=user))
+            return self.send_html(page("Running Services", f"<div class='card'><h3>Running Services</h3>{rows}</div>{pyproxy}{stack}<div class='card'><h3>Listening Ports</h3><pre class='raw'>{html.escape(ports)}</pre></div>", active="/services", user=user))
         if p == "/services/logs":
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             name = (q.get("name") or [""])[0]
@@ -1069,6 +1095,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.stream_cmd("Issue / Renew SSL", ["bash", s, "issue"] if s else ["echo", "ssl helper not found - use terminal menu option 03"])
             if job == "vnstat":
                 return self.stream_cmd("Install vnstat", ["bash", "-c", "apt-get update -qq && apt-get install -y vnstat && systemctl enable --now vnstat && echo vnstat ready"], back="/stats")
+            if job in ("pyproxy-start", "pyproxy-stop", "pyproxy-restart", "pyproxy-force-start", "pyproxy-force-stop"):
+                # Python Proxy controls - fixed allowlist, the subcommand is
+                # derived from the job name, never from raw user input.
+                ctl = suite_script("ws-proxy-ctl.sh")
+                sub = job[len("pyproxy-"):]
+                title = "Python Proxy - " + sub.replace("-", " ").title()
+                return self.stream_cmd(title, ["bash", ctl, sub] if ctl else ["echo", "ws-proxy-ctl.sh not found - run vpsupdate first"])
+            if job == "pyproxy-setport":
+                ctl = suite_script("ws-proxy-ctl.sh")
+                raw = (data.get("port") or "").strip()
+                if not raw.isdigit() or not (1 <= int(raw) <= 65535):
+                    return self.stream_cmd("Python Proxy - Set Port", ["echo", "[ERROR] Invalid port - enter an integer between 1 and 65535"])
+                return self.stream_cmd("Python Proxy - Set Port", ["bash", ctl, "set-port", str(int(raw))] if ctl else ["echo", "ws-proxy-ctl.sh not found - run vpsupdate first"])
             return self.redirect("/services")
         if p == "/telegram":
             cfg.update({"telegram_token": data.get("telegram_token", ""), "telegram_admin_id": data.get("telegram_admin_id", "")}); save_config(cfg); log_activity("telegram config saved"); return self.redirect("/telegram")
