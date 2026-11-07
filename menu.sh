@@ -46,7 +46,12 @@ add_ssh_user(){
   read -rp "IP limit (0 = unlimited) [0]: " ip; ip="${ip:-0}"
   # On a real VPS, create a tunnel-only system user:
   if [[ "${EUID:-$(id -u)}" -eq 0 ]] && command -v useradd >/dev/null; then
-    id "$u" >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin -e "$(date -d "+${days} days" +%F)" "$u" 2>/dev/null || warn "useradd skipped/failed"
+    # Dropbear rejects login shells that are not listed in /etc/shells,
+    # so the tunnel shell must be a member before accounts can log in.
+    grep -qx "/bin/false" /etc/shells 2>/dev/null || echo "/bin/false" >> /etc/shells 2>/dev/null || true
+    # Accounts created before the shell fix may still have a nologin shell.
+    [[ "$(getent passwd "$u" 2>/dev/null | cut -d: -f7)" == */nologin ]] && usermod -s /bin/false "$u" 2>/dev/null || true
+    id "$u" >/dev/null 2>&1 || useradd -M -s /bin/false -e "$(date -d "+${days} days" +%F)" "$u" 2>/dev/null || warn "useradd skipped/failed"
     echo "$u:$pw" | chpasswd 2>/dev/null || true
   fi
   PROXY_PORT=$(python3 -c "import json;print(json.load(open('$DATA/config.json')).get('ws_proxy_port',8080))" 2>/dev/null || echo 8080)

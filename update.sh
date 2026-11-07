@@ -28,6 +28,20 @@ fail(){ echo "[UPDATE-FAIL] $*" >&2; exit 1; }
 
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || fail "Root is required: sudo bash update.sh"
 
+# Self-exec guard: this script lives at $SUITE_DIR/update.sh and the
+# apply step below overwrites that very file while bash is still
+# reading it (cp -a truncates in place - same inode), so bash can
+# resume at a misaligned offset inside the NEW file and execute an
+# unpredictable blend of the old and new updater. Re-exec ONCE from a
+# private temp copy, so the running script is never the file being
+# replaced and a single `vpsupdate` always applies the full new flow.
+if [[ -z "${VPSMGR_UPDATE_REEXEC:-}" ]]; then
+  _self_tmp="$(mktemp /tmp/vpsmgr-update.XXXXXX.sh)" || exit 1
+  cp "$0" "$_self_tmp" 2>/dev/null || { rm -f "$_self_tmp"; exit 1; }
+  chmod 700 "$_self_tmp" 2>/dev/null || true
+  VPSMGR_UPDATE_REEXEC=1 exec bash "$_self_tmp" "$@"
+fi
+
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 TGZ="$TMP/suite.tgz"
 if [[ -n "${VPSMGR_TARBALL:-}" ]]; then
@@ -111,6 +125,15 @@ if [[ -f "$SUITE_DIR/lib/common.sh" ]]; then
 fi
 if declare -F ensure_xray_service >/dev/null 2>&1; then
   ensure_xray_service || echo "[update] Warning: the Xray service drop-in could not be installed."
+fi
+# SSH logins: Dropbear rejects accounts whose shell is not listed in
+# /etc/shells. Older panel/menu versions created the system user with a
+# nologin shell, which made every such account fail password login with
+# "incorrect user name or password". Guarantee the tunnel shell is listed
+# and repair the stored accounts in place.
+if declare -F ensure_tunnel_shell >/dev/null 2>&1; then
+  ensure_tunnel_shell || echo "[update] Warning: could not add the tunnel shell to /etc/shells."
+  repair_tunnel_shells || echo "[update] Warning: the SSH account shell repair did not complete."
 fi
 
 # ---- 4) COMPLETE any missing pieces ---------------------------------------
@@ -200,4 +223,28 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl is-active --quiet vps-bot 2>/dev/null && systemctl restart vps-bot 2>/dev/null || true
 fi
 
-echo "UPDATE OK - the latest version of VPS Manager Suite is installed. Panel: systemctl status vps-panel"
+# Verification pass: prove the core services are actually up before
+# claiming success. A restart above can fail (bad config, missing
+# binary) and the old script printed "UPDATE OK" anyway - a stopped
+# front door like HAProxy then looked like a finished update. Now any
+# core service that is down gets ONE start attempt, and whatever is
+# still down is named in a loud [WARNING] instead of a silent success.
+_upd_down=""
+if command -v systemctl >/dev/null 2>&1; then
+  for s in nginx haproxy vps-panel ws-proxy xray; do
+    if ! systemctl is-active --quiet "$s" 2>/dev/null; then
+      echo "[update] $s is not running after the restart - trying one start..."
+      systemctl start "$s" 2>/dev/null || true
+      sleep 1
+      systemctl is-active --quiet "$s" 2>/dev/null || _upd_down="$_upd_down $s"
+    fi
+  done
+fi
+if [[ -n "$_upd_down" ]]; then
+  echo "[WARNING] UPDATE APPLIED, but these services are NOT running:$_upd_down"
+  echo "[WARNING] The new version is in place; a service that will not start usually has a config or certificate problem."
+  echo "[WARNING] Diagnose: systemctl status <service>  |  journalctl -u <service> -n 30 --no-pager"
+  echo "[WARNING] Or run the repair pass: menu option 06 (Fix Stack)."
+else
+  echo "UPDATE OK - the latest version of VPS Manager Suite is installed, and all core services (nginx, haproxy, vps-panel, ws-proxy, xray) are verified running. Panel: systemctl status vps-panel"
+fi

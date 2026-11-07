@@ -97,7 +97,10 @@ EOF
 # Note: the -s/-g flags are NOT used - they block password logins,
 # and our tunnel users log in with passwords.
 echo "Welcome to VPS Manager Suite" > "$CONFIG_DIR/banner.txt" 2>/dev/null || true
-# Tunnel-only: new SSH users are created from the menu/panel with shell /usr/sbin/nologin
+# Tunnel-only: new SSH users are created from the menu/panel/bot with
+# shell /bin/false. Dropbear rejects login shells that are not listed in
+# /etc/shells, so make sure the tunnel shell is a member right away.
+ensure_tunnel_shell || warn "Could not add /bin/false to /etc/shells - SSH password logins would be rejected"
 
 # 5) ws-proxy (Python Proxy service)
 # Port from the suite config (ws_proxy_port, default 8080) so a port chosen
