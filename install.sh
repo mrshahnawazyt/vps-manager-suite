@@ -124,13 +124,24 @@ EOF
 # 6) Nginx internal router + HAProxy mux
 info "Applying the Nginx + HAProxy templates..."
 sed "s/__DOMAIN__/$DOMAIN/g; s/__PANEL_PORT__/9090/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/nginx.conf.tpl" > /etc/nginx/nginx.conf
-sed "s/__DOMAIN__/$DOMAIN/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg
+sed "s/__DOMAIN__/$DOMAIN/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg
 nginx -t || warn "nginx config test warning"
-haproxy -c -f /etc/haproxy/haproxy.cfg || warn "haproxy config test warning"
+# HAProxy terminates TLS on 443 from the bundle $CONFIG_DIR/ssl/haproxy.pem.
+# On a reinstall the cert pair already exists, so the bundle can be built
+# and the config fully checked right away. On a first install the pair is
+# only created in the SSL step below - the check is deferred until then
+# (issue_ssl builds the bundle, and the services start after it).
+build_haproxy_pem || true
+if [[ -s "$CONFIG_DIR/ssl/haproxy.pem" ]]; then
+  haproxy -c -f /etc/haproxy/haproxy.cfg || warn "haproxy config test warning"
+else
+  info "HAProxy config check deferred - the TLS bundle is built in the SSL step below"
+fi
 
 # 7) SSL - Let's Encrypt (standalone, port 80) or self-signed fallback.
 # Use issue_ssl() from common.sh - it stops nginx/haproxy to free port 80,
-# verifies the certificate, and builds combined.pem.
+# verifies the certificate, and builds combined.pem + haproxy.pem (the
+# single-file TLS bundle HAProxy terminates port 443 with).
 info "Requesting an SSL certificate (Let's Encrypt)..."
 issue_ssl "$DOMAIN" || warn "The SSL step failed - the panel will run on HTTP. Issue SSL again from menu option 03 for the Xray TLS inbounds."
 install_renewal_hook || true

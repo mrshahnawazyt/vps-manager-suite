@@ -161,11 +161,41 @@ fi
 # Certs + xray config self-heal (creates the self-signed pair if absent)
 python3 "$SUITE_DIR/scripts/sync-xray.py" --restart >/dev/null 2>&1 || true
 
+# Router configs re-render (nginx + HAProxy) from the NEW templates.
+# This matters most for port 443: HAProxy now TERMINATES TLS and routes
+# CONNECT to ws-proxy, while an existing install still carries the old
+# SNI-passthrough config in /etc/haproxy/haproxy.cfg - and nothing else
+# in the update flow rewrites it. Also rebuild the HAProxy TLS bundle
+# (haproxy.pem) from the current cert pair; HAProxy will not start on
+# 443 without it. The restarts at the end of this script (nginx and
+# haproxy are in the loop below) put the new frontend live, so no manual
+# fix-stack run is needed after updating.
+_upd_dom="$(python3 -c "import json;print(json.load(open('/var/lib/vps-manager/config.json')).get('domain',''))" 2>/dev/null || echo "")"
+if [[ -z "$_upd_dom" ]] && declare -F get_domain >/dev/null 2>&1; then _upd_dom="$(get_domain)"; fi
+if [[ -n "$_upd_dom" ]]; then
+  _upd_wsp="$(python3 -c "import json;print(json.load(open('/var/lib/vps-manager/config.json')).get('ws_proxy_port',8080))" 2>/dev/null || echo 8080)"
+  [[ "$_upd_wsp" =~ ^[0-9]+$ ]] || _upd_wsp=8080
+  if [[ -d /etc/nginx ]]; then
+    sed "s/__DOMAIN__/$_upd_dom/g; s/__PANEL_PORT__/9090/g; s/__WSPROXY_PORT__/$_upd_wsp/g" "$SUITE_DIR/templates/nginx.conf.tpl" > /etc/nginx/nginx.conf 2>/dev/null \
+      && echo "[update] nginx router re-rendered from the new template" || echo "[update] Warning: could not re-render /etc/nginx/nginx.conf"
+  fi
+  if [[ -d /etc/haproxy ]]; then
+    sed "s/__DOMAIN__/$_upd_dom/g; s/__WSPROXY_PORT__/$_upd_wsp/g" "$SUITE_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg 2>/dev/null \
+      && echo "[update] haproxy config re-rendered (port 443 = TLS termination + CONNECT routing)" || echo "[update] Warning: could not re-render /etc/haproxy/haproxy.cfg"
+  fi
+else
+  echo "[update] Warning: no domain found in the config - router configs not re-rendered (run menu option 06, Fix Stack, after setting a domain)."
+fi
+if declare -F build_haproxy_pem >/dev/null 2>&1; then
+  build_haproxy_pem && echo "[update] HAProxy TLS bundle rebuilt (/etc/vps-manager/ssl/haproxy.pem)" \
+    || echo "[update] Warning: no SSL certificate pair found - HAProxy 443 stays down until SSL is issued (menu option 03)."
+fi
+
 # Restart the services (where present)
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable vps-monitor 2>/dev/null || true
-  for s in vps-panel ws-proxy xray vps-monitor; do systemctl restart "$s" 2>/dev/null || true; done
+  for s in nginx haproxy vps-panel ws-proxy xray vps-monitor; do systemctl restart "$s" 2>/dev/null || true; done
   # restart the bot only if it was running (never start it unconfigured)
   systemctl is-active --quiet vps-bot 2>/dev/null && systemctl restart vps-bot 2>/dev/null || true
 fi
