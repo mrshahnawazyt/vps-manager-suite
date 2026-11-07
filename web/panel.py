@@ -10,9 +10,20 @@ Credentials: /etc/vps-manager/credentials.json if it exists, else $DATA_DIR/cred
 import os, json, time, uuid, hashlib, secrets, subprocess, shutil, urllib.parse, html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
-import ssl
+import ssl, sys, threading
 
 BASE = os.path.dirname(os.path.abspath(__file__))
+# Pure-python QR generator (scripts/qr.py) for Xray link QR codes
+_qr = None
+for _qd in (os.path.join(BASE, "..", "scripts"), "/opt/vps-manager-suite/scripts"):
+    try:
+        sys.path.insert(0, os.path.abspath(_qd))
+        import qr as _qr_mod
+        _qr = _qr_mod
+        break
+    except Exception:
+        _qr = None
+_QR_CACHE = {}
 DATA_DIR = os.environ.get("VPSMGR_DATA_DIR", "/var/lib/vps-manager")
 # Local dev: if /var/lib is not writable, fall back to ./data
 try:
@@ -65,10 +76,58 @@ def sync_xray():
             return
 def save_config(c): save_json("config.json", c)
 
+CTX = threading.local()  # per-request context for the audit log
+
 def log_activity(action):
     logs = load_json("activity.json", [])
-    logs.insert(0, {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "action": action})
+    logs.insert(0, {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "action": action,
+                    "admin": getattr(CTX, "user", "") or "", "ip": getattr(CTX, "ip", "") or ""})
     save_json("activity.json", logs[:300])
+
+# --- Panel admins: multi-admin with roles ------------------------------------
+# credentials.json is the bootstrap Super Admin (Settings / terminal managed,
+# it can never be deleted or disabled here - the panel can never lock the
+# owner out). Extra admins live in admins.json with PBKDF2 password hashes
+# and one of the roles: viewer (read-only) / admin / super.
+ROLES = ("viewer", "admin", "super")
+_ROLE_ORDER = {"viewer": 0, "admin": 1, "super": 2}
+
+def _hash_pw(pw, salt=None):
+    salt = salt or os.urandom(16).hex()
+    return salt, hashlib.pbkdf2_hmac("sha256", str(pw).encode(), bytes.fromhex(salt), 120000).hex()
+
+def load_admins(): return load_json("admins.json", [])
+def save_admins(rows): save_json("admins.json", rows)
+
+def verify_login(username, password):
+    """-> (username, role) or None."""
+    creds = load_creds()
+    if username == creds.get("username") and password and password == creds.get("password"):
+        return (username, "super")
+    for a in load_admins():
+        if a.get("username") == username and not a.get("disabled") and password:
+            _s, h = _hash_pw(password, a.get("salt", ""))
+            if secrets.compare_digest(h, a.get("hash", "")):
+                role = a.get("role", "viewer")
+                return (username, role if role in ROLES else "viewer")
+    return None
+
+def role_at_least(role, need):
+    return _ROLE_ORDER.get(role, 0) >= _ROLE_ORDER.get(need, 0)
+
+def enabled_super_count():
+    n = 1  # the bootstrap Super Admin always exists
+    for a in load_admins():
+        if a.get("role") == "super" and not a.get("disabled"):
+            n += 1
+    return n
+
+def suite_script(name):
+    for cand in (os.path.join("/opt/vps-manager-suite/scripts", name),
+                 os.path.join(BASE, "..", "scripts", name),
+                 os.path.join(os.getcwd(), "scripts", name)):
+        if os.path.exists(cand): return cand
+    return ""
 
 # --- LIMIT SEMANTICS (user-confirmed, EXACT) ---------------------------------
 # Days / Expiry:      LITERAL count only. Default 30. Expiry = creation date + Days.
@@ -175,8 +234,23 @@ def sys_stats():
     except Exception: stats["net_rx_gb"] = stats["net_tx_gb"] = 0
     return stats
 
+def vnstat_section(role):
+    """Traffic history via vnstat, with a one-click install when missing."""
+    import html as _h
+    if not shutil.which("vnstat"):
+        btn = ""
+        if role_at_least(role, "admin"):
+            btn = ("<form method='post' action='/action/run'><input type='hidden' name='job' value='vnstat'>"
+                   "<button>Install vnstat</button></form>")
+        return ("<p class='mut'>vnstat is not installed yet. It records daily/monthly traffic history per interface.</p>" + btn)
+    one = subprocess.getoutput("vnstat --oneline 2>/dev/null | head -n 3")
+    daily = subprocess.getoutput("vnstat -d 2>/dev/null | head -n 20")
+    monthly = subprocess.getoutput("vnstat -m 2>/dev/null | head -n 14")
+    return (f"<pre class='raw'>{_h.escape(one)}</pre><h4>Daily</h4><pre class='raw'>{_h.escape(daily)}</pre>"
+            f"<h4>Monthly</h4><pre class='raw'>{_h.escape(monthly)}</pre>")
+
 def service_list():
-    names = ["nginx", "haproxy", "xray", "dropbear", "ssh", "ws-proxy", "vps-panel", "cron", "systemd-resolved"]
+    names = ["nginx", "haproxy", "xray", "dropbear", "ssh", "ws-proxy", "vps-panel", "vps-monitor", "vps-bot", "cron", "systemd-resolved"]
     out = []
     for n in names:
         status = "unknown"
@@ -189,6 +263,9 @@ def service_list():
     return out
 
 CSS = """<style>
+.qrd{margin-top:6px}
+.qrd summary{cursor:pointer;color:var(--acc2);font-size:13px}
+.qrbox{background:#fff;display:inline-block;padding:8px;border-radius:10px;margin-top:6px;line-height:0}
 *{box-sizing:border-box}
 :root{--bg:#07090d;--panel:#0b0f14;--card:#10151d;--card2:#0d1117;--line:#1e2833;--txt:#dbe4ee;--mut:#8494a7;--acc:#45e3c0;--acc2:#38bdf8;--ok:#3ddc84;--bad:#f87171;--warn:#fbbf24}
 html,body{margin:0;padding:0}
@@ -341,13 +418,69 @@ def chip(status):
     if status in ("inactive", "failed"): return "<span class='pill off'>● stopped</span>"
     return f"<span class='pill warn'>● {html.escape(str(status))}</span>"
 
+# Transport map - mirrors scripts/vpsm.py (keep the two in sync)
+XR_TCP_PORT = {"vless": 8443, "trojan": 8446, "vmess": 8447}
+XR_XHTTP_TLS_PORT = {"vless": 8444, "trojan": 8445, "vmess": 8448}
+XR_XHTTP_PATH = {"vless": "/xhttp", "trojan": "/xhttp-trojan", "vmess": "/xhttp-vmess"}
+XR_WS_PATH = {"vless": "/vless", "trojan": "/trojan", "vmess": "/vmess"}
+
+def build_links(proto, uid, domain, remark):
+    """The 5 links of one Xray account: TLS / NTLS / TCP / XHTTP TLS / XHTTP NTLS."""
+    import base64 as _b64
+    proto = str(proto or "").lower()
+    def _vm(net, port, tls_on, path=""):
+        vm = {"v": "2", "ps": remark, "add": domain, "port": str(port), "id": uid, "aid": "0",
+              "net": net, "type": "none", "host": domain, "path": path or "", "tls": "tls" if tls_on else ""}
+        if tls_on: vm["sni"] = domain
+        return "vmess://" + _b64.b64encode(json.dumps(vm).encode()).decode()
+    if proto == "vmess":
+        return {
+            "Link TLS": _vm("ws", 443, True, "/vmess"),
+            "Link NTLS": _vm("ws", 80, False, "/vmess"),
+            "Link TCP": _vm("tcp", XR_TCP_PORT["vmess"], True),
+            "Link XHTTP TLS": _vm("xhttp", XR_XHTTP_TLS_PORT["vmess"], True, "/xhttp-vmess"),
+            "Link XHTTP NTLS": _vm("xhttp", 80, False, "/xhttp-vmess"),
+        }
+    if proto == "trojan":
+        return {
+            "Link TLS": f"trojan://{uid}@{domain}:443?security=tls&type=ws&host={domain}&path=%2Ftrojan&sni={domain}#{remark}",
+            "Link NTLS": f"trojan://{uid}@{domain}:80?security=none&type=ws&host={domain}&path=%2Ftrojan#{remark}",
+            "Link TCP": f"trojan://{uid}@{domain}:{XR_TCP_PORT['trojan']}?security=tls&type=tcp&headerType=none&sni={domain}#{remark}-tcp",
+            "Link XHTTP TLS": f"trojan://{uid}@{domain}:{XR_XHTTP_TLS_PORT['trojan']}?security=tls&type=xhttp&path=%2Fxhttp-trojan&host={domain}&mode=auto&sni={domain}#{remark}-xhttp-tls",
+            "Link XHTTP NTLS": f"trojan://{uid}@{domain}:80?security=none&type=xhttp&path=%2Fxhttp-trojan&host={domain}&mode=auto#{remark}-xhttp-ntls",
+        }
+    return {
+        "Link TLS": f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=ws&host={domain}&path=%2Fvless&sni={domain}#{remark}",
+        "Link NTLS": f"vless://{uid}@{domain}:80?encryption=none&security=none&type=ws&host={domain}&path=%2Fvless#{remark}",
+        "Link TCP": f"vless://{uid}@{domain}:{XR_TCP_PORT['vless']}?encryption=none&security=tls&type=tcp&headerType=none&sni={domain}#{remark}-tcp",
+        "Link XHTTP TLS": f"vless://{uid}@{domain}:{XR_XHTTP_TLS_PORT['vless']}?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&host={domain}&mode=auto&sni={domain}#{remark}-xhttp-tls",
+        "Link XHTTP NTLS": f"vless://{uid}@{domain}:80?encryption=none&security=none&type=xhttp&path=%2Fxhttp&host={domain}&mode=auto#{remark}-xhttp-ntls",
+    }
+
+def qr_svg_for(link):
+    """Inline SVG QR for one share link (cached; pure-python generator)."""
+    if _qr is None or not link:
+        return ""
+    if link in _QR_CACHE:
+        return _QR_CACHE[link]
+    try:
+        s = _qr.svg(link, module=3, border=2)
+    except Exception:
+        s = ""
+    if len(_QR_CACHE) > 300:
+        _QR_CACHE.clear()
+    _QR_CACHE[link] = s
+    return s
+
 def links_html(links, prefix):
     out = []
     for i, (k, v) in enumerate(links.items()):
         cid = f"{prefix}-{i}"
+        svg = qr_svg_for(v)
+        qr_html = f"<details class='qrd'><summary>QR code</summary><div class='qrbox'>{svg}</div></details>" if svg else ""
         out.append(f"<div class='linkrow'><div class='lh'><span class='lt'>{html.escape(k)}</span>"
                    f"<button type='button' class='small ghost' onclick=\"copyText('{cid}', this)\">Copy</button></div>"
-                   f"<code id='{cid}'>{html.escape(v)}</code></div>")
+                   f"<code id='{cid}'>{html.escape(v)}</code>{qr_html}</div>")
     return "".join(out)
 
 RULE_NOTE = ("<p class='mut'>Rule: <b>Days is a literal count</b> (default 30) - Expiry = creation date + Days. "
@@ -355,16 +488,100 @@ RULE_NOTE = ("<p class='mut'>Rule: <b>Days is a literal count</b> (default 30) -
              "Example: Days 30 / GB 0 / IP 0 -&gt; Expires: creation + 30 days, Data: Unlimited, IP Limit: Unlimited.</p>")
 LIMIT_HINT = "<p class='mut' style='margin-top:-4px'>0 = Unlimited. If you set a value, the account stops automatically when the limit is reached.</p>"
 
+STATUS_LABEL = {"Expired": "EXPIRED", "Quota": "GB-LIMIT", "IP Limit": "IP-LIMIT", "Locked": "LOCKED"}
+
 def display_status(acct):
-    """Status for lists: a disabled record shows its stored reason."""
+    """Status for lists: Active / EXPIRED / GB-LIMIT / IP-LIMIT / LOCKED."""
     if acct.get("disabled"):
-        return str(acct.get("disabled_reason") or "Disabled")
-    return account_status(acct)
+        return STATUS_LABEL.get(str(acct.get("disabled_reason") or ""), "LOCKED")
+    st = account_status(acct)
+    return {"Expired": "EXPIRED", "Quota Full": "GB-LIMIT"}.get(st, st)
 
 def status_pill(st):
     if st == "Active": return "<span class='pill on'>Active</span>"
-    if st.startswith("Disabled"): return "<span class='pill off'>" + html.escape(st) + "</span>"
+    if st == "LOCKED": return "<span class='pill off'>LOCKED</span>"
     return "<span class='pill warn'>" + html.escape(st) + "</span>"
+
+def dead_note(acct):
+    """'auto-delete in 3h 12m' for a disabled account (monitor grace period)."""
+    if not acct.get("disabled"): return ""
+    grace = to_int(load_config().get("auto_delete_hours", 24), 24)
+    if grace <= 0: return ""
+    at = acct.get("disabled_at")
+    if not at: return ""
+    try:
+        import datetime as _dt
+        start = _dt.datetime.fromisoformat(str(at))
+        left = start + _dt.timedelta(hours=grace) - _dt.datetime.now()
+        secs = int(left.total_seconds())
+    except Exception:
+        return ""
+    if secs <= 0: return "auto-delete due"
+    if secs >= 3600: return f"auto-delete in {secs // 3600}h {(secs % 3600) // 60}m"
+    return f"auto-delete in {max(1, secs // 60)}m"
+
+def server_location():
+    """Server City/Region (best effort, cached 24h in the data dir)."""
+    import urllib.request as _u
+    cache = load_json("server_geo.json", {})
+    try:
+        if cache.get("city") and (time.time() - float(cache.get("ts", 0))) < 86400:
+            return cache
+    except Exception: pass
+    try:
+        ip = _u.urlopen(_u.Request("https://api.ipify.org", headers={"User-Agent": "vps-manager-suite"}), timeout=4).read().decode().strip()
+        with _u.urlopen(_u.Request(f"http://ip-api.com/json/{ip}?fields=status,city,regionName,country", headers={"User-Agent": "vps-manager-suite"}), timeout=4) as r:
+            d = json.loads(r.read().decode("utf-8", "ignore"))
+        if d.get("status") == "success":
+            cache = {"city": d.get("city", ""), "region": d.get("regionName", ""), "country": d.get("country", ""), "ts": time.time()}
+            save_json("server_geo.json", cache)
+    except Exception: pass
+    return cache
+
+def _parse_day(s):
+    import datetime as _dt
+    try: return _dt.date.fromisoformat(str(s)[:10])
+    except Exception: return None
+
+def acct_renew(acct, add_days):
+    """Renewal extends from the CURRENT expiry (base = max(today, expires))."""
+    import datetime as _dt
+    add = to_int(add_days, 30)
+    exp = _parse_day(acct.get("expires") or expires_on(acct.get("created", ""), acct.get("expiry_days", 30)))
+    base = max(_dt.date.today(), exp) if exp else _dt.date.today()
+    new_exp = base + _dt.timedelta(days=add)
+    created = _parse_day(acct.get("created", "")) or _dt.date.today()
+    acct["expires"] = new_exp.isoformat()
+    acct["expiry_days"] = (new_exp - created).days
+    if acct.get("disabled") and acct.get("disabled_reason") == "Expired":
+        acct.pop("disabled", None); acct.pop("disabled_reason", None); acct.pop("disabled_at", None)
+    return acct
+
+def acct_edit_limits(acct, gb, ip):
+    acct["gb_limit"] = to_int(gb, 0); acct["ip_limit"] = to_int(ip, 0)
+    if acct.get("disabled") and acct.get("disabled_reason") == "Quota":
+        try: used = float(acct.get("used_gb") or 0)
+        except Exception: used = 0
+        if acct["gb_limit"] == 0 or used < acct["gb_limit"]:
+            acct.pop("disabled", None); acct.pop("disabled_reason", None); acct.pop("disabled_at", None)
+    return acct
+
+def acct_reset_usage(acct):
+    acct["used_gb"] = 0
+    acct["reset_counter"] = True  # the monitor re-bases its traffic counter
+    acct.pop("ip_blocked_until", None)
+    if acct.get("disabled") and acct.get("disabled_reason") == "Quota":
+        acct.pop("disabled", None); acct.pop("disabled_reason", None); acct.pop("disabled_at", None)
+    return acct
+
+def acct_set_lock(acct, locked):
+    import datetime as _dt
+    if locked:
+        acct["disabled"] = True; acct["disabled_reason"] = "Locked"
+        acct["disabled_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+    else:
+        acct.pop("disabled", None); acct.pop("disabled_reason", None); acct.pop("disabled_at", None)
+    return acct
 
 def system_user_create(username, password, expiry_ymd):
     """Create a real tunnel-only system user (root only). Best-effort: never raises."""
@@ -396,12 +613,66 @@ def system_user_delete(username):
         try: log_activity(f"ssh system user delete error for {username}: {e}")
         except Exception: pass
 
+def system_user_lock(username, locked):
+    """Lock: usermod -L + kill the user's sessions. Unlock: usermod -U."""
+    if os.geteuid() != 0: return
+    try:
+        subprocess.run(["usermod", "-L" if locked else "-U", username], capture_output=True, timeout=10)
+        if locked:
+            uid = subprocess.getoutput(f"id -u {username} 2>/dev/null").strip()
+            if uid.isdigit(): subprocess.run(["pkill", "-u", uid], capture_output=True, timeout=10)
+    except Exception as e:
+        try: log_activity(f"ssh lock error for {username}: {e}")
+        except Exception: pass
+
+def system_user_set_expiry(username, expiry_ymd):
+    if os.geteuid() != 0: return
+    try: subprocess.run(["usermod", "-e", expiry_ymd, username], capture_output=True, timeout=10)
+    except Exception: pass
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def session_user(self):
         c = SimpleCookie(self.headers.get("Cookie", ""))
-        if "session" in c and c["session"].value in SESSIONS: return SESSIONS[c["session"].value]
+        if "session" in c and c["session"].value in SESSIONS:
+            v = SESSIONS[c["session"].value]
+            return v.get("user") if isinstance(v, dict) else v
         return None
+    def session_role(self):
+        c = SimpleCookie(self.headers.get("Cookie", ""))
+        if "session" in c and c["session"].value in SESSIONS:
+            v = SESSIONS[c["session"].value]
+            return v.get("role", "super") if isinstance(v, dict) else "super"
+        return ""
+    def client_ip(self):
+        return self.headers.get("X-Real-IP") or self.headers.get("X-Forwarded-For", "").split(",")[0].strip() or self.client_address[0]
+    def set_ctx(self):
+        CTX.user = self.session_user() or ""
+        CTX.ip = self.client_ip()
+    def stream_cmd(self, title, argv, back="/services", back_label="Back"):
+        """Run a command and stream its output to the browser line by line."""
+        log_activity("run: " + " ".join(str(a) for a in argv)[:120])
+        self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
+        head = ("<!DOCTYPE html><html><head><meta charset='utf-8'><title>" + html.escape(title) + "</title></head>"
+                "<body style='background:#0b0f14;color:#dbe4ee;font-family:monospace;padding:18px'>"
+                "<h3 style='font-family:system-ui'>" + html.escape(title) + "</h3><pre style='white-space:pre-wrap'>")
+        try: self.wfile.write(head.encode()); self.wfile.flush()
+        except Exception: return
+        rc = 1
+        try:
+            proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                try:
+                    self.wfile.write(html.escape(line).encode()); self.wfile.flush()
+                except Exception:
+                    proc.kill(); break
+            rc = proc.wait()
+        except Exception as e:
+            try: self.wfile.write(("failed to start: %s" % e).encode())
+            except Exception: pass
+        tail = ("</pre><p style='font-family:system-ui'>Finished (exit %s). <a style='color:#38bdf8' href='%s'>%s</a></p></body></html>" % (rc, back, back_label))
+        try: self.wfile.write(tail.encode()); self.wfile.flush()
+        except Exception: pass
     def send_html(self, content, code=200, headers=None):
         b = content.encode(); self.send_response(code); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(b)))
         if headers:
@@ -418,6 +689,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = urllib.parse.urlparse(self.path).path
+        self.set_ctx()
         if p == "/login":
             body = ("<div class='logincard'>" + BRAND +
                     "<h2>Panel Login</h2><p class='sub'>Sign in to manage your VPS.</p>"
@@ -453,11 +725,23 @@ class Handler(BaseHTTPRequestHandler):
             users = load_json("ssh_users.json", [])
             def _ssh_row(u):
                 st = display_status(u)
-                return (f"<tr><td><b>{html.escape(u['username'])}</b></td><td><code>{html.escape(u.get('password',''))}</code></td>"
+                un = html.escape(u['username'])
+                dn = dead_note(u)
+                note = f"<br><small class='bad'>{html.escape(dn)}</small>" if dn else ""
+                locked = bool(u.get("disabled") and u.get("disabled_reason") == "Locked")
+                lock_btn = (f"<form method='post' action='/ssh/lock' style='display:inline'><input type='hidden' name='username' value='{un}'><input type='hidden' name='locked' value='0'><button class='small ghost'>Unlock</button></form>"
+                            if locked else
+                            f"<form method='post' action='/ssh/lock' style='display:inline'><input type='hidden' name='username' value='{un}'><input type='hidden' name='locked' value='1'><button class='small ghost'>Lock</button></form>")
+                acts = (f"<form method='post' action='/ssh/renew' style='display:inline'><input type='hidden' name='username' value='{un}'><input name='days' type='number' value='30' min='1' style='width:64px;display:inline-block;margin:0 4px 4px 0'><button class='small ghost'>Renew</button></form> "
+                        f"<form method='post' action='/ssh/limits' style='display:inline'><input type='hidden' name='username' value='{un}'><input name='gb_limit' type='number' value='{to_int(u.get('gb_limit',0))}' min='0' title='GB limit (0 = unlimited)' style='width:56px;display:inline-block;margin:0 2px 4px 0'><input name='ip_limit' type='number' value='{to_int(u.get('ip_limit',0))}' min='0' title='IP limit (0 = unlimited)' style='width:56px;display:inline-block;margin:0 4px 4px 0'><button class='small ghost'>Set Limits</button></form> "
+                        f"<form method='post' action='/ssh/reset' style='display:inline'><input type='hidden' name='username' value='{un}'><button class='small ghost'>Reset Usage</button></form> "
+                        f"{lock_btn} "
+                        f"<form method='post' action='/ssh/delete' style='display:inline'><input type='hidden' name='username' value='{un}'><button class='danger'>Delete</button></form>")
+                return (f"<tr><td><b>{un}</b></td><td><code>{html.escape(u.get('password',''))}</code></td>"
                         f"<td>{fmt_expiry(u.get('expiry_days',30))}<br><small class='mut'>Expires: {expires_on(u.get('created',''), u.get('expiry_days',30))}</small></td>"
-                        f"<td>{fmt_data(u.get('gb_limit',0))}</td><td>{fmt_logins(u.get('ip_limit',0))}</td>"
-                        f"<td>{html.escape(u.get('created',''))}</td><td>{status_pill(st)}</td>"
-                        f"<td><form method='post' action='/ssh/delete'><input type='hidden' name='username' value='{html.escape(u['username'])}'><button class='danger'>Delete</button></form></td></tr>")
+                        f"<td>{fmt_data(u.get('gb_limit',0))}<br><small class='mut'>Used: {u.get('used_gb',0)} GB</small></td><td>{fmt_logins(u.get('ip_limit',0))}</td>"
+                        f"<td>{html.escape(u.get('created',''))}</td><td>{status_pill(st)}{note}</td>"
+                        f"<td style='min-width:300px'>{acts}</td></tr>")
             rows = "".join(_ssh_row(u) for u in users) or "<tr><td colspan='8' class='mut'>No SSH accounts yet.</td></tr>"
             payload = f"GET /sshws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]"
             body = f"""<div class='card'><h3>Create SSH Account (tunnel-only)</h3><form method='post' action='/ssh/create'><label>Username</label><input name='username' placeholder='Username' required><label>Password</label><input name='password' placeholder='Password (blank = auto-generated)'><label>Days</label><input name='expiry_days' type='number' min='0' value='30'><label>GB limit (0 = unlimited)</label><input name='gb_limit' type='number' min='0' value='0'><label>IP limit (0 = unlimited)</label><input name='ip_limit' type='number' min='0' value='0'>{LIMIT_HINT}<button>Create Account</button></form>{RULE_NOTE}</div>
@@ -469,22 +753,59 @@ class Handler(BaseHTTPRequestHandler):
             def _xr_card(u):
                 _links = u.get('links') or {"Link TLS": u.get('link', '')}
                 st = display_status(u)
-                return (f"<div class='card'><h3>{html.escape(u['protocol'].upper())} · {html.escape(u['remark'])} {status_pill(st)}</h3>"
+                dn = dead_note(u)
+                note = f" <small class='bad'>{html.escape(dn)}</small>" if dn else ""
+                locked = bool(u.get("disabled") and u.get("disabled_reason") == "Locked")
+                lock_btn = (f"<form method='post' action='/xray/lock' style='display:inline'><input type='hidden' name='id' value='{u['id']}'><input type='hidden' name='locked' value='0'><button class='small ghost'>Unlock</button></form>"
+                            if locked else
+                            f"<form method='post' action='/xray/lock' style='display:inline'><input type='hidden' name='id' value='{u['id']}'><input type='hidden' name='locked' value='1'><button class='small ghost'>Lock</button></form>")
+                acts = (f"<div style='margin-top:12px'><form method='post' action='/xray/renew' style='display:inline'><input type='hidden' name='id' value='{u['id']}'><input name='days' type='number' value='30' min='1' style='width:64px;display:inline-block;margin:0 4px 4px 0'><button class='small ghost'>Renew</button></form> "
+                        f"<form method='post' action='/xray/limits' style='display:inline'><input type='hidden' name='id' value='{u['id']}'><input name='gb_limit' type='number' value='{to_int(u.get('gb_limit',0))}' min='0' title='GB limit (0 = unlimited)' style='width:56px;display:inline-block;margin:0 2px 4px 0'><input name='ip_limit' type='number' value='{to_int(u.get('ip_limit',0))}' min='0' title='IP limit (0 = unlimited)' style='width:56px;display:inline-block;margin:0 4px 4px 0'><button class='small ghost'>Set Limits</button></form> "
+                        f"<form method='post' action='/xray/reset' style='display:inline'><input type='hidden' name='id' value='{u['id']}'><button class='small ghost'>Reset Usage</button></form> "
+                        f"{lock_btn} "
+                        f"<form method='post' action='/xray/delete' style='display:inline'><input type='hidden' name='id' value='{u['id']}'><button class='danger'>Delete</button></form></div>")
+                return (f"<div class='card'><h3>{html.escape(u['protocol'].upper())} · {html.escape(u['remark'])} {status_pill(st)}{note}</h3>"
                         f"<div class='kv'><div><div class='k'>UUID</div><div class='v'><code>{html.escape(u['id'])}</code></div></div>"
                         f"<div><div class='k'>Created</div><div class='v'>{html.escape(u.get('created',''))}</div></div>"
                         f"<div><div class='k'>Expiry</div><div class='v'>{expires_on(u.get('created',''), u.get('expiry_days',30))} ({fmt_expiry(u.get('expiry_days',30))})</div></div>"
                         f"<div><div class='k'>Data</div><div class='v'>{fmt_data(u.get('gb_limit',0))}</div></div>"
+                        f"<div><div class='k'>Used</div><div class='v'>{u.get('used_gb',0)} GB</div></div>"
                         f"<div><div class='k'>IP Limit</div><div class='v'>{fmt_logins(u.get('ip_limit',0))}</div></div></div>"
                         f"<div style='margin-top:12px'>{links_html(_links, 'xr-' + u['id'][:8])}</div>"
-                        f"<form method='post' action='/xray/delete'><input type='hidden' name='id' value='{u['id']}'><button class='danger'>Delete</button></form></div>")
+                        f"{acts}</div>")
             cards = "".join(_xr_card(u) for u in users) or "<div class='card'><p class='mut'>No Xray accounts yet.</p></div>"
             body = f"""<div class='card'><h3>Create Xray Account</h3><form method='post' action='/xray/create'><label>Protocol</label><select name='protocol'><option>VMess</option><option>VLESS</option><option>Trojan</option></select><label>Remark / Name</label><input name='remark' placeholder='Remark / Name' required><label>Days</label><input name='expiry_days' type='number' min='0' value='30'><label>GB limit (0 = unlimited)</label><input name='gb_limit' type='number' min='0' value='0'><label>IP limit (0 = unlimited)</label><input name='ip_limit' type='number' min='0' value='0'>{LIMIT_HINT}<button>Create Account (UUID auto)</button></form>{RULE_NOTE}</div>
             <h3 style='margin:18px 0 10px'>Xray Accounts</h3>{cards}"""
             return self.send_html(page("Xray Accounts", body, active="/xray", user=user))
         if p == "/services":
-            svcs = service_list(); rows = "".join(f"<div class='svcrow'><span>{html.escape(x['name'])}</span>{chip(x['status'])}</div>" for x in svcs)
+            role = self.session_role()
+            def _svc_row(x):
+                n = html.escape(x["name"])
+                ctl = ""
+                if role_at_least(role, "admin"):
+                    ctl = (f"<form method='post' action='/action/service' style='display:inline'><input type='hidden' name='name' value='{n}'>"
+                           f"<button class='small ghost' name='op' value='start'>Start</button> <button class='small ghost' name='op' value='stop'>Stop</button> <button class='small ghost' name='op' value='restart'>Restart</button></form> "
+                           f"<a class='btn ghost small' href='/services/logs?name={n}'>Logs</a>")
+                return f"<div class='svcrow'><span>{n}</span><span>{chip(x['status'])} {ctl}</span></div>"
+            rows = "".join(_svc_row(x) for x in service_list())
             ports = subprocess.getoutput("ss -tuln 2>/dev/null | head -n 40") if shutil.which("ss") else "ss is not available (local dev environment)"
-            return self.send_html(page("Running Services", f"<div class='card'><h3>Running Services</h3>{rows}</div><div class='card'><h3>Listening Ports</h3><pre class='raw'>{html.escape(ports)}</pre><form method='post' action='/action/fix'><button>Fix SSH-WS/SSL Stack</button></form></div>", active="/services", user=user))
+            stack = ""
+            if role_at_least(role, "admin"):
+                stack = ("<div class='card'><h3>Stack Actions (live output)</h3>"
+                         "<form method='post' action='/action/run' style='display:inline'><input type='hidden' name='job' value='install'><button>Install All</button></form> "
+                         "<form method='post' action='/action/run' style='display:inline'><input type='hidden' name='job' value='fix'><button class='ghost'>Fix Stack</button></form> "
+                         "<form method='post' action='/action/run' style='display:inline'><input type='hidden' name='job' value='xray'><button class='ghost'>Repair Xray Sync</button></form> "
+                         "<form method='post' action='/action/run' style='display:inline'><input type='hidden' name='job' value='ssl'><button class='ghost'>Issue / Renew SSL</button></form> "
+                         "<form method='post' action='/action/restart-all' style='display:inline'><button class='ghost'>Restart All Services</button></form></div>")
+            return self.send_html(page("Running Services", f"<div class='card'><h3>Running Services</h3>{rows}</div>{stack}<div class='card'><h3>Listening Ports</h3><pre class='raw'>{html.escape(ports)}</pre></div>", active="/services", user=user))
+        if p == "/services/logs":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = (q.get("name") or [""])[0]
+            allowed = {x["name"] for x in service_list()}
+            if name not in allowed:
+                return self.send_html(page("Logs", "<div class='card'><h3>Unknown service</h3><p><a class='btn ghost' href='/services'>Back</a></p></div>", active="/services", user=user), code=404)
+            out = subprocess.getoutput(f"journalctl -u {name} -n 60 --no-pager 2>&1 | tail -n 60")
+            return self.send_html(page("Service Logs", f"<div class='card'><h3>Logs: {html.escape(name)}</h3><pre class='raw'>{html.escape(out)}</pre><p><a class='btn ghost' href='/services'>Back to Services</a></p></div>", active="/services", user=user))
         if p == "/stats":
             s = sys_stats()
             return self.send_html(page("VPS Stats", f"""<div class='grid'>
@@ -492,7 +813,8 @@ class Handler(BaseHTTPRequestHandler):
             <div class='card stat'><div class='lbl'>RAM Usage</div><div class='big'>{s.get('ram')}%</div><div class='bar'><i style='width:{s.get('ram')}%'></i></div><div class='sub'>{s.get('ram_total_gb')} GB total</div></div>
             <div class='card stat'><div class='lbl'>Disk Usage</div><div class='big'>{s.get('disk')}%</div><div class='bar'><i style='width:{s.get('disk')}%'></i></div><div class='sub'>{s.get('disk_total_gb')} GB total</div></div>
             <div class='card stat'><div class='lbl'>Network</div><div class='big' style='font-size:20px'>RX {s.get('net_rx_gb')} GB</div><div class='sub'>TX {s.get('net_tx_gb')} GB · Uptime: {html.escape(s.get('uptime',''))}</div></div>
-            </div><div class='card'><h3>Speedtest</h3><form method='post' action='/action/speedtest'><button>Run Speedtest</button></form></div>""", active="/stats", user=user))
+            </div><div class='card'><h3>Speedtest</h3><form method='post' action='/action/speedtest'><button>Run Speedtest</button></form></div>
+            <div class='card'><h3>Traffic History (vnstat)</h3>{vnstat_section(self.session_role())}</div>""", active="/stats", user=user))
         if p == "/telegram":
             cfg = load_config()
             return self.send_html(page("Telegram Bot", f"<div class='card'><h3>Telegram Bot Setup</h3><form method='post' action='/telegram'><label>Bot Token</label><input name='telegram_token' value='{html.escape(cfg.get('telegram_token',''))}' placeholder='Token from @BotFather'><label>Admin Chat ID</label><input name='telegram_admin_id' value='{html.escape(cfg.get('telegram_admin_id',''))}'><button>Save</button></form><p class='mut'>To run the bot on the VPS: <code>python3 scripts/telegram-bot.py</code> - the token is stored here, never hardcoded in code.</p></div>", active="/telegram", user=user))
@@ -505,23 +827,51 @@ class Handler(BaseHTTPRequestHandler):
             <label>QoS Rate</label><input name='qos_rate' value='{html.escape(cfg.get('qos_rate','950mbit'))}'>
             <label>Per-client cap (Mbps, 0 = no cap)</label><input name='per_client_cap' value='{html.escape(str(cfg.get('per_client_cap','0')))}'>
             <button>Save Settings</button></form></div>
-            <div class='card'><h3>Maintenance</h3><form method='post' action='/action/fix' style='display:inline'><button>Fix Stack</button></form> <form method='post' action='/action/qos' style='display:inline'><button class='ghost'>Apply QoS (CAKE)</button></form></div>
+            <div class='card'><h3>Maintenance</h3><form method='post' action='/action/fix' style='display:inline'><button>Fix Stack</button></form> <form method='post' action='/action/qos' style='display:inline'><button class='ghost'>Apply QoS</button></form> <form method='post' action='/action/qos-off' style='display:inline'><button class='ghost'>Remove QoS</button></form></div>
+            <div class='card'><h3>QoS Status</h3><pre class='raw'>{html.escape(subprocess.getoutput(('bash ' + suite_script('qos.sh') + ' status') if suite_script('qos.sh') else 'echo qos.sh not found'))}</pre></div>
+            <div class='card'><h3>SSL Certificate</h3><pre class='raw'>{html.escape(subprocess.getoutput(('bash ' + suite_script('ssl.sh') + ' status') if suite_script('ssl.sh') else 'echo ssl helper not found'))}</pre><form method='post' action='/action/run' style='display:inline'><input type='hidden' name='job' value='ssl'><button class='ghost'>Issue / Renew SSL</button></form></div>
             <div class='card'><h3>Change Panel Password</h3><form method='post' action='/password'><label>New password</label><input name='new_password' type='password' required placeholder='New password'><button>Change Password</button></form></div>""", active="/settings", user=user))
         if p == "/admins":
-            creds = load_creds()
-            return self.send_html(page("Panel Admins", f"<div class='card'><h3>Panel Admins</h3><p>Admin user: <b>{html.escape(creds.get('username','admin'))}</b></p><p class='mut'>The password is stored in the credentials file and is not shown here. You can change it under Settings.</p><p><a class='btn ghost small' href='/activity'>View Activity Log</a></p></div>", active="/admins", user=user))
+            creds = load_creds(); role = self.session_role()
+            extras = load_admins()
+            def _role_opts(cur):
+                return "".join(f"<option value='{r}'{' selected' if r == cur else ''}>{r.title()}</option>" for r in ROLES)
+            rows = [f"<tr><td><b>{html.escape(creds.get('username','admin'))}</b></td><td>Super Admin (main)</td><td>Active</td><td class='mut'>Managed in Settings / terminal - cannot be deleted or disabled</td></tr>"]
+            for a in extras:
+                un = html.escape(a.get("username", ""))
+                st = "Disabled" if a.get("disabled") else "Active"
+                acts = ""
+                if role == "super":
+                    acts = (f"<form method='post' action='/admins/pass' style='display:inline'><input type='hidden' name='username' value='{un}'><input name='password' type='password' placeholder='New password' style='width:130px;display:inline-block;margin:0 4px 4px 0'><button class='small ghost'>Set Password</button></form> "
+                            f"<form method='post' action='/admins/role' style='display:inline'><input type='hidden' name='username' value='{un}'><select name='role' style='width:110px;display:inline-block;margin:0 4px 4px 0'>{_role_opts(a.get('role','viewer'))}</select><button class='small ghost'>Set Role</button></form> "
+                            f"<form method='post' action='/admins/toggle' style='display:inline'><input type='hidden' name='username' value='{un}'><button class='small ghost'>{'Enable' if a.get('disabled') else 'Disable'}</button></form> "
+                            f"<form method='post' action='/admins/delete' style='display:inline'><input type='hidden' name='username' value='{un}'><button class='danger'>Delete</button></form>")
+                rows.append(f"<tr><td><b>{un}</b></td><td>{html.escape(a.get('role','viewer').title())}</td><td>{st}</td><td>{acts}</td></tr>")
+            add_form = ""
+            if role == "super":
+                add_form = (f"<div class='card'><h3>Add Panel Admin</h3><form method='post' action='/admins/add'>"
+                            f"<label>Username</label><input name='username' required><label>Password</label><input name='password' type='password' required>"
+                            f"<label>Role</label><select name='role'>{_role_opts('admin')}</select>"
+                            f"<p class='mut'>Viewer = read-only. Admin = full account management. Super = also manages panel admins. Passwords are stored as PBKDF2 hashes.</p><button>Add Admin</button></form></div>")
+            body = (f"<div class='card'><h3>Panel Admins</h3><div class='tblwrap'><table><tr><th>User</th><th>Role</th><th>Status</th><th></th></tr>{''.join(rows)}</table></div>"
+                    f"<p><a class='btn ghost small' href='/activity'>View Activity Log</a></p></div>{add_form}")
+            return self.send_html(page("Panel Admins", body, active="/admins", user=user))
         if p == "/activity":
-            logs = load_json("activity.json", []); rows = "".join(f"<tr><td>{html.escape(l['time'])}</td><td>{html.escape(l['action'])}</td></tr>" for l in logs[:100]) or "<tr><td colspan='2' class='mut'>No activity yet.</td></tr>"
-            return self.send_html(page("Activity", f"<div class='card'><h3>Activity Log</h3><div class='tblwrap'><table><tr><th>Time</th><th>Action</th></tr>{rows}</table></div></div>", active="/activity", user=user))
+            logs = load_json("activity.json", [])
+            rows = "".join(f"<tr><td>{html.escape(l.get('time',''))}</td><td>{html.escape(l.get('admin','') or '-')}</td><td>{html.escape(l.get('ip','') or '-')}</td><td>{html.escape(l.get('action',''))}</td></tr>" for l in logs[:100]) or "<tr><td colspan='4' class='mut'>No activity yet.</td></tr>"
+            return self.send_html(page("Activity", f"<div class='card'><h3>Activity Log (audit)</h3><div class='tblwrap'><table><tr><th>Time</th><th>Admin</th><th>Source IP</th><th>Action</th></tr>{rows}</table></div></div>", active="/activity", user=user))
         return self.send_html(page("404", "<div class='card'><h3>404 - Page not found</h3><p class='mut'>The page you requested does not exist.</p></div>", user=user), code=404)
 
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path
         data = self.form()
+        self.set_ctx()
         if p == "/login":
-            creds = load_creds()
-            if data.get("username") == creds.get("username") and data.get("password") == creds.get("password"):
-                tok = secrets.token_hex(24); SESSIONS[tok] = creds.get("username"); log_activity(f"login success: {creds.get('username')}")
+            who = verify_login(data.get("username", ""), data.get("password", ""))
+            if who:
+                tok = secrets.token_hex(24); SESSIONS[tok] = {"user": who[0], "role": who[1]}
+                CTX.user = who[0]
+                log_activity(f"login success: {who[0]} ({who[1]})")
                 return self.redirect("/", code=303, headers=[("Set-Cookie", f"session={tok}; HttpOnly; Path=/; SameSite=Lax")])
             log_activity("login failed")
             body = ("<div class='logincard'>" + BRAND +
@@ -532,6 +882,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html(page("Login Failed", body, nav=False), code=401)
         user = self.session_user()
         if not user: return self.redirect("/login")
+        role = self.session_role()
+        if not role_at_least(role, "admin"):
+            return self.send_html(page("Read-only", "<div class='card'><h3>Read-only access</h3><p class='mut'>Your account has the Viewer role: you can look at everything, but changes are disabled. Ask a Super Admin to raise your role under Panel Admins.</p></div>", user=user), code=403)
+        if p.startswith("/admins") and role != "super":
+            return self.send_html(page("Super Admin only", "<div class='card'><h3>Super Admin only</h3><p class='mut'>Panel admin management is restricted to Super Admins.</p></div>", user=user), code=403)
+        if p == "/password" and role != "super":
+            return self.send_html(page("Super Admin only", "<div class='card'><h3>Super Admin only</h3><p class='mut'>The main panel password can only be changed by a Super Admin. Extra admins get their password set under Panel Admins.</p></div>", user=user), code=403)
         cfg = load_config(); domain = cfg.get("domain") or ""
         if p == "/ssh/create":
             users = load_json("ssh_users.json", [])
@@ -546,11 +903,14 @@ class Handler(BaseHTTPRequestHandler):
             # When running as root, also create the real tunnel-only system user so the account can log in.
             system_user_create(uname, pwd, exp_date)
             payload = f"GET /sshws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]"
+            _loc = server_location()
             body = f"""<div class='card result'><h3>🔐 SSH Account Created</h3><div class='kv'>
             <div><div class='k'>Username</div><div class='v'>{html.escape(uname)}</div></div>
             <div><div class='k'>Password</div><div class='v'><code>{html.escape(pwd)}</code></div></div>
             <div><div class='k'>Host / Domain</div><div class='v'>{html.escape(domain)}</div></div>
             <div><div class='k'>SNI</div><div class='v'>{html.escape(domain)}</div></div>
+            <div><div class='k'>City</div><div class='v'>{html.escape(_loc.get('city','') or '-')}</div></div>
+            <div><div class='k'>Region</div><div class='v'>{html.escape(_loc.get('region','') or '-')}</div></div>
             <div><div class='k'>Created</div><div class='v'>{created}</div></div>
             <div><div class='k'>Expiry</div><div class='v'>{exp_date} ({fmt_expiry(exp)})</div></div>
             <div><div class='k'>Data</div><div class='v'>{fmt_data(gb)}</div></div>
@@ -568,30 +928,38 @@ class Handler(BaseHTTPRequestHandler):
             users = [u for u in load_json("ssh_users.json", []) if u["username"] != uname]; save_json("ssh_users.json", users); log_activity(f"ssh delete {uname}")
             if uname: system_user_delete(uname)
             return self.redirect("/ssh")
+        if p in ("/ssh/renew", "/ssh/limits", "/ssh/reset", "/ssh/lock"):
+            uname = data.get("username", "")
+            users = load_json("ssh_users.json", [])
+            rec = next((u for u in users if u.get("username") == uname), None)
+            if rec is None: return self.redirect("/ssh")
+            if p == "/ssh/renew":
+                acct_renew(rec, data.get("days", 30))
+                system_user_set_expiry(uname, rec.get("expires", ""))
+                log_activity(f"ssh renew {uname} +{data.get('days', 30)}d -> {rec.get('expires')}")
+            elif p == "/ssh/limits":
+                was_locked = bool(rec.get("disabled"))
+                acct_edit_limits(rec, data.get("gb_limit", 0), data.get("ip_limit", 0))
+                if was_locked and not rec.get("disabled"): system_user_lock(uname, False)
+                log_activity(f"ssh limits {uname} gb={rec.get('gb_limit')} ip={rec.get('ip_limit')}")
+            elif p == "/ssh/reset":
+                was_locked = bool(rec.get("disabled"))
+                acct_reset_usage(rec)
+                if was_locked and not rec.get("disabled"): system_user_lock(uname, False)
+                log_activity(f"ssh reset usage {uname}")
+            elif p == "/ssh/lock":
+                locked = data.get("locked") == "1"
+                acct_set_lock(rec, locked)
+                system_user_lock(uname, locked)
+                log_activity(f"ssh {'lock' if locked else 'unlock'} {uname}")
+            save_json("ssh_users.json", users)
+            return self.redirect("/ssh")
         if p == "/xray/create":
             users = load_json("xray_users.json", []); proto = data.get("protocol", "VLESS").lower(); uid = str(uuid.uuid4()); remark = data.get("remark", "user")
-            import base64
-            def _vmess_link(port, tls_on):
-                vm = {"v": "2", "ps": remark, "add": domain, "port": str(port), "id": uid, "aid": "0", "net": "ws", "type": "none", "host": domain, "path": "/vmess", "tls": "tls" if tls_on else ""}
-                return "vmess://" + base64.b64encode(json.dumps(vm).encode()).decode()
-            # Links per account, like the reference panel.
+            # 5 links per account for every protocol (see build_links).
             # Chain: 443 -> HAProxy (SNI) -> Xray TLS fallback -> Nginx -> inbound
-            #         80 -> HAProxy -> Nginx -> inbound ; 8443 -> Xray TCP/TLS direct
-            if proto == "vless":
-                links = {
-                  "Link TLS": f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=ws&host={domain}&path=%2Fvless&sni={domain}#{remark}",
-                  "Link NTLS": f"vless://{uid}@{domain}:80?encryption=none&security=none&type=ws&host={domain}&path=%2Fvless#{remark}",
-                  "Link TCP": f"vless://{uid}@{domain}:8443?encryption=none&security=tls&type=tcp&headerType=none&sni={domain}#{remark}-tcp",
-                  "Link XHTTP TLS": f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&host={domain}&mode=auto&sni={domain}#{remark}-xhttp-tls",
-                  "Link XHTTP NTLS": f"vless://{uid}@{domain}:80?encryption=none&security=none&type=xhttp&path=%2Fxhttp&host={domain}&mode=auto#{remark}-xhttp-ntls",
-                }
-            elif proto == "trojan":
-                links = {
-                  "Link TLS": f"trojan://{uid}@{domain}:443?security=tls&type=ws&host={domain}&path=%2Ftrojan&sni={domain}#{remark}",
-                  "Link NTLS": f"trojan://{uid}@{domain}:80?security=none&type=ws&host={domain}&path=%2Ftrojan#{remark}",
-                }
-            else:
-                links = {"Link TLS": _vmess_link(443, True), "Link NTLS": _vmess_link(80, False)}
+            #         80 -> HAProxy -> Nginx -> inbound ; TCP/XHTTP-TLS ports -> Xray direct
+            links = build_links(proto, uid, domain, remark)
             link = links.get("Link TLS", "")
             exp = to_int(data.get("expiry_days", 30), 30); gb = to_int(data.get("gb_limit", 0), 0); ipl = to_int(data.get("ip_limit", 0), 0)
             created = time.strftime("%Y-%m-%d")
@@ -613,10 +981,107 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html(page("Xray Account Created", body, active="/xray", user=user))
         if p == "/xray/delete":
             users = [u for u in load_json("xray_users.json", []) if u["id"] != data.get("id")]; save_json("xray_users.json", users); log_activity("xray delete"); sync_xray(); return self.redirect("/xray")
+        if p in ("/xray/renew", "/xray/limits", "/xray/reset", "/xray/lock"):
+            uid = data.get("id", "")
+            users = load_json("xray_users.json", [])
+            rec = next((u for u in users if u.get("id") == uid), None)
+            if rec is None: return self.redirect("/xray")
+            if p == "/xray/renew":
+                acct_renew(rec, data.get("days", 30)); log_activity(f"xray renew {rec.get('remark')} +{data.get('days', 30)}d -> {rec.get('expires')}")
+            elif p == "/xray/limits":
+                acct_edit_limits(rec, data.get("gb_limit", 0), data.get("ip_limit", 0)); log_activity(f"xray limits {rec.get('remark')} gb={rec.get('gb_limit')} ip={rec.get('ip_limit')}")
+            elif p == "/xray/reset":
+                acct_reset_usage(rec); log_activity(f"xray reset usage {rec.get('remark')}")
+            elif p == "/xray/lock":
+                locked = data.get("locked") == "1"
+                acct_set_lock(rec, locked); log_activity(f"xray {'lock' if locked else 'unlock'} {rec.get('remark')}")
+            save_json("xray_users.json", users); sync_xray()
+            return self.redirect("/xray")
+        if p in ("/admins/add", "/admins/delete", "/admins/toggle", "/admins/role", "/admins/pass"):
+            admins = load_admins()
+            uname = (data.get("username") or "").strip()
+            creds = load_creds()
+            if uname == creds.get("username"):
+                return self.send_html(page("Protected", "<div class='card'><h3>Main Super Admin is protected</h3><p class='mut'>The bootstrap Super Admin cannot be changed here (last-super-admin protection). Manage it under Settings or from the terminal.</p><p><a class='btn ghost' href='/admins'>Back</a></p></div>", user=user), code=400)
+            rec = next((a for a in admins if a.get("username") == uname), None)
+            if p == "/admins/add":
+                pw = data.get("password", "")
+                rrole = data.get("role", "viewer")
+                if not uname or len(pw) < 6 or rrole not in ROLES or rec is not None:
+                    return self.send_html(page("Add Admin", "<div class='card'><h3>Could not add admin</h3><p class='mut'>Username must be new, the password needs at least 6 characters and the role must be valid.</p><p><a class='btn ghost' href='/admins'>Back</a></p></div>", user=user), code=400)
+                salt, h = _hash_pw(pw)
+                admins.append({"username": uname, "salt": salt, "hash": h, "role": rrole, "disabled": False})
+                save_admins(admins); log_activity(f"admin add {uname} role={rrole}")
+                return self.redirect("/admins")
+            if rec is None: return self.redirect("/admins")
+            if p == "/admins/delete":
+                if rec.get("role") == "super" and not rec.get("disabled") and enabled_super_count() <= 1:
+                    return self.send_html(page("Protected", "<div class='card'><h3>Last Super Admin</h3><p class='mut'>You cannot delete the last enabled Super Admin.</p><p><a class='btn ghost' href='/admins'>Back</a></p></div>", user=user), code=400)
+                save_admins([a for a in admins if a.get("username") != uname]); log_activity(f"admin delete {uname}")
+            elif p == "/admins/toggle":
+                newdis = not rec.get("disabled")
+                if newdis and rec.get("role") == "super" and enabled_super_count() <= 1:
+                    return self.send_html(page("Protected", "<div class='card'><h3>Last Super Admin</h3><p class='mut'>You cannot disable the last enabled Super Admin.</p><p><a class='btn ghost' href='/admins'>Back</a></p></div>", user=user), code=400)
+                rec["disabled"] = newdis; save_admins(admins); log_activity(f"admin {'disable' if newdis else 'enable'} {uname}")
+            elif p == "/admins/role":
+                nr = data.get("role", "viewer")
+                if nr in ROLES:
+                    if rec.get("role") == "super" and nr != "super" and not rec.get("disabled") and enabled_super_count() <= 1:
+                        return self.send_html(page("Protected", "<div class='card'><h3>Last Super Admin</h3><p class='mut'>You cannot demote the last enabled Super Admin.</p><p><a class='btn ghost' href='/admins'>Back</a></p></div>", user=user), code=400)
+                    rec["role"] = nr; save_admins(admins); log_activity(f"admin role {uname} -> {nr}")
+            elif p == "/admins/pass":
+                pw = data.get("password", "")
+                if len(pw) >= 6:
+                    salt, h = _hash_pw(pw); rec["salt"] = salt; rec["hash"] = h; save_admins(admins); log_activity(f"admin password set {uname}")
+            return self.redirect("/admins")
+        if p == "/action/service":
+            name = data.get("name", ""); op = data.get("op", "")
+            allowed = {x["name"] for x in service_list()}
+            if name in allowed and op in ("start", "stop", "restart"):
+                if name == "vps-panel" and op in ("stop", "restart"):
+                    subprocess.Popen(["bash", "-c", f"sleep 1; systemctl {op} vps-panel"])
+                else:
+                    subprocess.run(["systemctl", op, name], capture_output=True, timeout=30)
+                log_activity(f"service {op} {name}")
+            return self.redirect("/services")
+        if p == "/action/restart-all":
+            names = [x["name"] for x in service_list() if x["name"] not in ("vps-panel", "systemd-resolved")]
+            for n in names:
+                try: subprocess.run(["systemctl", "restart", n], capture_output=True, timeout=30)
+                except Exception: pass
+            subprocess.Popen(["bash", "-c", "sleep 2; systemctl restart vps-panel"])
+            log_activity("services restart all")
+            return self.send_html(page("Restart All", "<div class='card'><h3>All services restarted</h3><p class='mut'>The panel itself restarts last - refresh this page in a few seconds.</p><p><a class='btn ghost' href='/services'>Back to Services</a></p></div>", active="/services", user=user))
+        if p == "/action/run":
+            job = data.get("job", "")
+            if job == "install":
+                inst = next((c for c in ("/opt/vps-manager-suite/install.sh", os.path.join(BASE, "..", "install.sh")) if os.path.exists(c)), "")
+                argv = ["bash", inst] if inst else ["echo", "install.sh not found - run vpsupdate first"]
+                return self.stream_cmd("Install All Components", argv)
+            if job == "fix":
+                s = suite_script("fix-stack.sh")
+                return self.stream_cmd("Fix SSH-WS/SSL Stack", ["bash", s] if s else ["echo", "fix-stack.sh not found"])
+            if job == "xray":
+                s = suite_script("fix-xray-sync.py")
+                return self.stream_cmd("Repair Xray Sync", ["python3", s] if s else ["echo", "fix-xray-sync.py not found"])
+            if job == "ssl":
+                s = suite_script("ssl.sh")
+                return self.stream_cmd("Issue / Renew SSL", ["bash", s, "issue"] if s else ["echo", "ssl helper not found - use terminal menu option 03"])
+            if job == "vnstat":
+                return self.stream_cmd("Install vnstat", ["bash", "-c", "apt-get update -qq && apt-get install -y vnstat && systemctl enable --now vnstat && echo vnstat ready"], back="/stats")
+            return self.redirect("/services")
         if p == "/telegram":
             cfg.update({"telegram_token": data.get("telegram_token", ""), "telegram_admin_id": data.get("telegram_admin_id", "")}); save_config(cfg); log_activity("telegram config saved"); return self.redirect("/telegram")
         if p == "/settings":
-            cfg.update({k: data.get(k, cfg.get(k, "")) for k in ("domain", "banner", "qos_interface", "qos_rate", "per_client_cap")}); save_config(cfg); log_activity("settings saved"); return self.redirect("/settings")
+            old_domain = cfg.get("domain", "")
+            cfg.update({k: data.get(k, cfg.get(k, "")) for k in ("domain", "banner", "qos_interface", "qos_rate", "per_client_cap")}); save_config(cfg); log_activity("settings saved")
+            new_domain = cfg.get("domain", "")
+            if new_domain and new_domain != old_domain:
+                sd = suite_script("set-domain.sh")
+                if sd:
+                    log_activity(f"domain change {old_domain} -> {new_domain} (re-provisioning)")
+                    return self.stream_cmd("Domain Change - Re-provisioning", ["bash", sd, new_domain], back="/settings")
+            return self.redirect("/settings")
         if p == "/password":
             creds = load_creds(); creds["password"] = data.get("new_password", ""); save_json("credentials.json", creds)
             # If the system credentials file exists, update it there too
@@ -625,11 +1090,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception: pass
             log_activity("panel password changed"); return self.redirect("/settings")
         if p == "/action/fix":
-            _fix = next((c for c in ("/opt/vps-manager-suite/scripts/fix-stack.sh", os.path.join(BASE, "..", "scripts", "fix-stack.sh"), "scripts/fix-stack.sh") if os.path.exists(c)), "")
-            out = subprocess.getoutput(f"bash {_fix} 2>&1 | head -n 50") if _fix else "Fix script not found on this VPS (/opt/vps-manager-suite/scripts/fix-stack.sh). Run install/update first."
-            log_activity("maintenance fix-stack"); return self.send_html(page("Fix Stack", f"<div class='card'><h3>Fix SSH-WS/SSL Stack</h3><pre class='raw'>{html.escape(out)}</pre><a class='btn ghost' href='/services'>Back</a></div>", active="/services", user=user))
+            _fix = suite_script("fix-stack.sh")
+            return self.stream_cmd("Fix SSH-WS/SSL Stack", ["bash", _fix] if _fix else ["echo", "Fix script not found on this VPS. Run install/update first."])
         if p == "/action/qos":
-            log_activity("maintenance qos apply requested"); return self.send_html(page("QoS", "<div class='card'><h3>Ping QoS (CAKE)</h3><p>QoS apply request has been logged. On the VPS run: <code>sudo bash scripts/qos.sh</code></p><a class='btn ghost' href='/settings'>Back</a></div>", active="/settings", user=user))
+            _q = suite_script("qos.sh")
+            return self.stream_cmd("Apply QoS", ["bash", _q, "apply"] if _q else ["echo", "qos.sh not found"], back="/settings")
+        if p == "/action/qos-off":
+            _q = suite_script("qos.sh")
+            return self.stream_cmd("Remove QoS", ["bash", _q, "off"] if _q else ["echo", "qos.sh not found"], back="/settings")
         if p == "/action/speedtest":
             cli = shutil.which("speedtest-cli") or shutil.which("speedtest")
             out = subprocess.getoutput(f"{cli} --simple 2>&1 | head -n 20") if cli else "speedtest-cli is not installed. Install it with: apt install speedtest-cli"
