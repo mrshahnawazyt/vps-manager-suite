@@ -192,16 +192,26 @@ CSS = """<style>
 *{box-sizing:border-box}
 :root{--bg:#07090d;--panel:#0b0f14;--card:#10151d;--card2:#0d1117;--line:#1e2833;--txt:#dbe4ee;--mut:#8494a7;--acc:#45e3c0;--acc2:#38bdf8;--ok:#3ddc84;--bad:#f87171;--warn:#fbbf24}
 html,body{margin:0;padding:0}
-body{background:var(--bg);color:var(--txt);font-family:system-ui,'Segoe UI',Arial,sans-serif;font-size:15px}
+body{background:radial-gradient(1100px 550px at 85% -10%,rgba(56,189,248,.08),transparent 60%),radial-gradient(900px 500px at -10% 110%,rgba(69,227,192,.05),transparent 60%),var(--bg);color:var(--txt);font-family:system-ui,'Segoe UI',Arial,sans-serif;font-size:15px}
 a{color:var(--acc2);text-decoration:none}
 .layout{display:flex;min-height:100vh}
-.sidebar{width:232px;flex:0 0 232px;background:var(--panel);border-right:1px solid var(--line);padding:20px 14px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:4px}
-.brand{font-size:19px;font-weight:700;color:#fff;padding:2px 10px 4px}
-.brand small{display:block;font-size:11px;color:var(--acc);letter-spacing:2px;font-weight:600;margin-top:2px}
+.sidebar{width:232px;flex:0 0 232px;background:linear-gradient(180deg,rgba(69,227,192,.05),transparent 30%),var(--panel);border-right:1px solid var(--line);padding:20px 14px;position:sticky;top:0;height:100vh;display:flex;flex-direction:column;gap:4px;transition:transform .28s ease}
+.brand{display:flex;align-items:center;gap:11px;padding:2px 10px 4px}
+.brand .mark{width:38px;height:38px;flex:0 0 38px;border-radius:11px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:800;color:#06251e;box-shadow:0 4px 16px rgba(69,227,192,.35)}
+.brand .bt{font-size:17px;font-weight:700;color:#fff;line-height:1.2}
+.brand small{display:block;font-size:10px;color:var(--acc);letter-spacing:2.5px;font-weight:600;margin-top:1px}
+.sidehead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.closebtn{display:none;background:var(--card);border:1px solid var(--line);color:var(--txt);border-radius:9px;width:32px;height:32px;padding:0;font-size:14px;align-items:center;justify-content:center;flex:0 0 32px;cursor:pointer}
+.burger{display:none;background:var(--card);border:1px solid var(--line);color:var(--txt);border-radius:10px;padding:7px 12px;font-size:16px;line-height:1;cursor:pointer}
+#nav-overlay{position:fixed;inset:0;background:rgba(2,6,10,.6);opacity:0;pointer-events:none;transition:opacity .25s ease;z-index:40}
+.logincard .brand{padding:2px 0 12px}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#22303f;border-radius:99px;border:2px solid var(--bg)}
+::-webkit-scrollbar-track{background:transparent}
 .navlabel{font-size:10px;letter-spacing:2px;color:var(--mut);margin:16px 10px 6px;text-transform:uppercase}
-.snav a{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;color:var(--txt);font-size:14px;border:1px solid transparent}
+.snav a{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;color:var(--txt);font-size:14px;border:1px solid transparent;transition:background .2s,border-color .2s,color .2s}
 .snav a:hover{background:var(--card);border-color:var(--line)}
-.snav a.active{background:#0f2a24;border-color:#17453a;color:var(--acc);font-weight:600}
+.snav a.active{background:linear-gradient(90deg,rgba(69,227,192,.18),rgba(56,189,248,.08));border-color:#17453a;color:var(--acc);font-weight:600;box-shadow:inset 3px 0 0 var(--acc)}
 .snav .ic{width:20px;text-align:center;flex:0 0 20px}
 .sidefoot{margin-top:auto;padding:10px;color:var(--mut);font-size:12px;border-top:1px solid var(--line)}
 .main{flex:1;min-width:0;display:flex;flex-direction:column}
@@ -212,9 +222,9 @@ a{color:var(--acc2);text-decoration:none}
 .chip .dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
 .chip.off .dot{background:var(--bad)}
 .content{padding:22px;max-width:1180px;width:100%;margin:0 auto}
-h2{margin:4px 0 14px;font-size:22px}
+h2{margin:4px 0 14px;font-size:22px;background:linear-gradient(90deg,#ffffff,#9be8d8);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
 h3{margin:0 0 12px;font-size:15px;letter-spacing:.4px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin:0 0 16px}
+.card{background:linear-gradient(165deg,rgba(255,255,255,.035),rgba(255,255,255,0) 55%),var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin:0 0 16px;box-shadow:0 8px 24px rgba(0,0,0,.25)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin-bottom:16px}
 .stat .big{font-size:30px;font-weight:700;color:#fff}
 .stat .lbl{color:var(--acc);font-size:11px;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px}
@@ -232,7 +242,7 @@ th{color:var(--mut);font-size:11.5px;letter-spacing:1.2px;text-transform:upperca
 input,select,textarea{background:#0a0e13;color:#fff;border:1px solid #2a3644;border-radius:10px;padding:10px 12px;margin:4px 0 10px;width:100%;font-size:14px}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
 label{font-size:13px;color:var(--mut);display:block;margin-top:6px}
-button,.btn{background:var(--acc);color:#06251e;border:0;padding:10px 20px;border-radius:10px;cursor:pointer;font-weight:700;font-size:14px;display:inline-block}
+button,.btn{background:linear-gradient(135deg,var(--acc),#2bc4a8);color:#06251e;border:0;padding:10px 20px;border-radius:10px;cursor:pointer;font-weight:700;font-size:14px;display:inline-block;transition:filter .2s,transform .15s}
 button:hover,.btn:hover{filter:brightness(1.08)}
 button.ghost,.btn.ghost{background:var(--card);color:var(--txt);border:1px solid var(--line);font-weight:600}
 button.danger{background:#3a1418;color:#fda4a4;border:1px solid #5b1d22;font-weight:600;padding:7px 14px}
@@ -259,13 +269,13 @@ pre.raw{background:#05070a;border:1px solid var(--line);border-radius:12px;paddi
 .svcrow{display:flex;justify-content:space-between;align-items:center;padding:9px 2px;border-bottom:1px solid var(--line)}
 .svcrow:last-child{border-bottom:0}
 @media (max-width:860px){
-  .layout{flex-direction:column}
-  .sidebar{width:100%;flex:none;height:auto;position:static;padding:12px}
-  .snav{display:flex;flex-wrap:wrap;gap:6px}
-  .snav a{padding:8px 10px;font-size:13px}
-  .navlabel,.sidefoot{display:none}
+  .sidebar{position:fixed;left:0;top:0;width:264px;flex:none;height:100vh;height:100dvh;z-index:50;transform:translateX(-105%);box-shadow:0 0 44px rgba(0,0,0,.55);overflow-y:auto;padding:18px 14px}
+  body.nav-open .sidebar{transform:translateX(0)}
+  body.nav-open #nav-overlay{opacity:1;pointer-events:auto}
+  .burger{display:inline-block}
+  .closebtn{display:inline-flex}
   .content{padding:14px}
-  .topbar{padding:12px 14px}
+  .topbar{padding:12px 14px;flex-wrap:wrap}
 }
 </style>"""
 
@@ -276,6 +286,10 @@ function copyText(id, btn){
   function done(){ if(btn){ var o = btn.textContent; btn.textContent = 'Copied'; setTimeout(function(){ btn.textContent = o; }, 1200); } }
   if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done, done); }
   else { var ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); try{ document.execCommand('copy'); }catch(e){} document.body.removeChild(ta); done(); }
+}
+function toggleNav(force){
+  if(typeof force === 'boolean'){ document.body.classList.toggle('nav-open', force); }
+  else { document.body.classList.toggle('nav-open'); }
 }
 </script>"""
 
@@ -292,6 +306,9 @@ NAV_ITEMS = [
     ("/logout", "Logout", "⏻"),
 ]
 
+BRAND = ("<div class='brand'><span class='mark'>V</span>"
+         "<span class='bt'>VPS Manager<small>SUITE V1.0</small></span></div>")
+
 def page(title, body, nav=True, active="", user=""):
     if not nav:
         return ("<!doctype html><html><head><meta charset='utf-8'>"
@@ -299,7 +316,7 @@ def page(title, body, nav=True, active="", user=""):
                 f"<title>{html.escape(title)} - VPS Manager</title>{CSS}</head>"
                 f"<body><div class='loginwrap'>{body}</div>{JS}</body></html>")
     links = "".join(
-        f"<a href='{href}' class='{'active' if href == active else ''}'><span class='ic'>{ic}</span>{label}</a>"
+        f"<a href='{href}' class='{'active' if href == active else ''}' onclick='toggleNav(false)'><span class='ic'>{ic}</span>{label}</a>"
         for href, label, ic in NAV_ITEMS)
     cfg = load_config(); domain = cfg.get("domain") or ""
     dom_chip = f"<span class='chip'><span class='dot'></span>{html.escape(domain)}</span>" if domain else ""
@@ -307,12 +324,14 @@ def page(title, body, nav=True, active="", user=""):
     return ("<!doctype html><html><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
             f"<title>{html.escape(title)} - VPS Manager</title>{CSS}</head><body>"
+            "<div id='nav-overlay' onclick='toggleNav(false)'></div>"
             "<div class='layout'>"
-            f"<aside class='sidebar'><div class='brand'>🚀 VPS Manager<small>SUITE V1.0</small></div>"
+            f"<aside class='sidebar' id='sidebar'><div class='sidehead'>{BRAND}"
+            "<button type='button' class='closebtn' onclick='toggleNav(false)' aria-label='Close menu'>✕</button></div>"
             f"<div class='navlabel'>Menu</div><nav class='snav'>{links}</nav>"
             "<div class='sidefoot'>Web Panel · Port " + str(PORT) + "</div></aside>"
             "<div class='main'>"
-            f"<div class='topbar'><span class='title'>{html.escape(title)}</span><span class='sp'></span>{dom_chip}{user_chip}"
+            f"<div class='topbar'><button type='button' class='burger' onclick='toggleNav()' aria-label='Open menu'>☰</button><span class='title'>{html.escape(title)}</span><span class='sp'></span>{dom_chip}{user_chip}"
             "<a class='btn ghost small' href='javascript:location.reload()'>Refresh</a></div>"
             f"<div class='content'>{body}</div>"
             "</div></div>" + JS + "</body></html>")
@@ -400,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = urllib.parse.urlparse(self.path).path
         if p == "/login":
-            body = ("<div class='logincard'><div class='brand'>🚀 VPS Manager<small>SUITE V1.0</small></div>"
+            body = ("<div class='logincard'>" + BRAND +
                     "<h2>Panel Login</h2><p class='sub'>Sign in to manage your VPS.</p>"
                     "<form method='post' action='/login'><label>Username</label><input name='username' required autofocus>"
                     "<label>Password</label><input name='password' type='password' required>"
@@ -505,7 +524,7 @@ class Handler(BaseHTTPRequestHandler):
                 tok = secrets.token_hex(24); SESSIONS[tok] = creds.get("username"); log_activity(f"login success: {creds.get('username')}")
                 return self.redirect("/", code=303, headers=[("Set-Cookie", f"session={tok}; HttpOnly; Path=/; SameSite=Lax")])
             log_activity("login failed")
-            body = ("<div class='logincard'><div class='brand'>🚀 VPS Manager<small>SUITE V1.0</small></div>"
+            body = ("<div class='logincard'>" + BRAND +
                     "<h2>Panel Login</h2><p class='bad'>Invalid username or password</p>"
                     "<form method='post' action='/login'><label>Username</label><input name='username' required autofocus>"
                     "<label>Password</label><input name='password' type='password' required>"
