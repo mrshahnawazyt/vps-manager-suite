@@ -56,7 +56,7 @@ def is_expired(acct):
         return False
 
 def stats_email(acct):
-    """Xray stats/log attribution ke liye per-user email.
+    """Per-user email for Xray stats/log attribution.
     limit-check.sh uses this exact same function — keep both in sync."""
     e = re.sub(r"[^A-Za-z0-9@._\-]", "_", str(acct.get("remark") or acct.get("id") or ""))
     return e or str(acct.get("id") or "")
@@ -128,7 +128,7 @@ def main():
         print("sync-xray: xray config test OK")
     if "--restart" in sys.argv and os.path.exists("/run/systemd/system"):
         subprocess.run(["systemctl", "restart", "xray"], capture_output=True)
-        print("sync-xray: xray restart ki koshish ho gayi")
+        print("sync-xray: xray restart attempted")
     return 0
 
 if __name__ == "__main__":

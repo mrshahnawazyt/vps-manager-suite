@@ -188,7 +188,7 @@ def ssh_counters(uids):
 # ---------------- SSH IP enforcement (live sessions) ----------------
 
 def ssh_sessions():
-    """{uid: [{ip, pid, start}]} — sirf SSH ports (22/109/143) par, sirf sshd/dropbear processes."""
+    """{uid: [{ip, pid, start}]} — only on SSH ports (22/109/143), only sshd/dropbear processes."""
     if not shutil.which("ss"):
         return {}
     r = run(["ss", "-tnp", "state", "established"], timeout=10)
@@ -250,7 +250,7 @@ def enforce_ssh_ip(rec, sessions):
 # ---------------- Xray IP enforcement (access log) ----------------
 
 def xray_recent_ips():
-    """{email: {ip,...}} — pichle 10 minute ke access log se. Log na ho to {}."""
+    """{email: {ip,...}} — from the last 10 minutes of the access log. No log -> {}."""
     if not os.path.exists(ACCESS_LOG):
         return {}
     cutoff = NOW - datetime.timedelta(minutes=10)
@@ -321,7 +321,7 @@ def main():
         except Exception:
             pass
     counters = ssh_counters(set(uid_by_name.values()))
-    sessions = None  # lazy — sirf zaroorat par
+    sessions = None  # lazy — only when needed
     for u in ssh:
         who = u.get("username") or "?"
         if u.get("disabled") is True:
