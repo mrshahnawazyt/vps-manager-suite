@@ -300,5 +300,18 @@ cat <<EOF
   Run the menu : vpsmenu  or  bash menu.sh
 EOF
 print_ports
+# Final welcome box - printed LAST so it is the screen the user is left
+# looking at when the install ends: panel URL + login + how to open the menu.
+_WELCOME_EDGE="+--------------------------------------------+"
+_wline(){ printf '| %-42s |\n' "$1"; }
+echo "$_WELCOME_EDGE"
+_wline "WELCOME - INSTALL COMPLETE"
+echo "$_WELCOME_EDGE"
+_wline "Panel : $PANEL_LINE"
+_wline "User  : admin"
+_wline "Pass  : ${PANEL_PASS:-(see menu option 10)}"
+echo "$_WELCOME_EDGE"
+_wline "Type menu to open the main menu"
+echo "$_WELCOME_EDGE"
 ok "Done! Open the panel and log in."
 echo "Go to Settings to confirm or change your password."
