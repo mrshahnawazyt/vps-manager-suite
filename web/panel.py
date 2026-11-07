@@ -765,6 +765,8 @@ def ssh_result_cards(uname, pwd, domain, created, exp, exp_date, gb, ipl, loc):
     """The result cards shown after an SSH account is created - used by the
     classic result page AND as the closing fragment of the popup stream."""
     payload = f"GET /sshws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]"
+    ws_port = to_int(load_config().get("ws_proxy_port", 8080), 8080)
+    vpn_details = f"{html.escape(domain)}:443@{html.escape(uname)}:{html.escape(pwd)}"
     return f"""<div class='card result'><h3>🔐 SSH Account Created</h3><div class='kv'>
     <div><div class='k'>Username</div><div class='v'>{html.escape(uname)}</div></div>
     <div><div class='k'>Password</div><div class='v'><code>{html.escape(pwd)}</code></div></div>
@@ -776,11 +778,15 @@ def ssh_result_cards(uname, pwd, domain, created, exp, exp_date, gb, ipl, loc):
     <div><div class='k'>Expiry</div><div class='v'>{exp_date} ({fmt_expiry(exp)})</div></div>
     <div><div class='k'>Data</div><div class='v'>{fmt_data(gb)}</div></div>
     <div><div class='k'>IP Limit</div><div class='v'>{fmt_logins(ipl)}</div></div>
-    <div><div class='k'>SSH Direct</div><div class='v'>22 · 109 · 143</div></div>
+    <div><div class='k'>SSH Direct</div><div class='v'>22 · 109 · 143 · 447</div></div>
     <div><div class='k'>SSH SSL</div><div class='v'>443</div></div>
-    <div><div class='k'>SSH WS</div><div class='v'>80</div></div>
-    <div><div class='k'>SSH WS-SSL</div><div class='v'>443</div></div>
-    </div></div>
+    <div><div class='k'>SSH WS</div><div class='v'>80 → /sshws</div></div>
+    <div><div class='k'>SSH WS-SSL</div><div class='v'>443 → /sshws</div></div>
+    <div><div class='k'>Python Proxy</div><div class='v'>{ws_port}</div></div>
+    </div>
+    <h3 style='margin-top:16px'>VPN Details</h3>
+    <div class='codebox'><button type='button' class='copybtn' onclick="copyText('new-ssh-vpn', this)">Copy</button><pre id='new-ssh-vpn'>{vpn_details}</pre></div>
+    </div>
     <div class='card'><h3>Payload</h3><div class='codebox'><button type='button' class='copybtn' onclick="copyText('new-ssh-payload', this)">Copy</button><pre id='new-ssh-payload'>{html.escape(payload)}</pre></div>
     <p style='margin-top:14px'><a class='btn ghost' href='/ssh'>Back to SSH Accounts</a></p></div>"""
 
