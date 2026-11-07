@@ -385,6 +385,18 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;word-bre
 pre.raw{background:#05070a;border:1px solid var(--line);border-radius:12px;padding:14px;overflow-x:auto;font-size:12.5px}
 .svcrow{display:flex;justify-content:space-between;align-items:center;padding:9px 2px;border-bottom:1px solid var(--line)}
 .svcrow:last-child{border-bottom:0}
+.svcblk{border:1px solid var(--line);border-radius:12px;background:var(--card2);padding:12px 14px;margin:0 0 10px}
+.svcblk:last-child{margin-bottom:0}
+.svchead{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.svcname{font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.svchead .pill{flex:0 0 auto}
+.svcbtns{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}
+.svcbtns form{margin:0}
+.svcbtns button,.svcbtns .btn{width:100%;text-align:center;font-size:13px}
+.svcbtns .btn{padding:6px 14px}
+.svcbtns.wide{grid-template-columns:repeat(6,1fr)}
+.svcbtns.wide form{grid-column:span 2}
+.svcbtns.wide form.force{grid-column:span 3}
 @media (max-width:860px){
   .sidebar{position:fixed;left:0;top:0;width:264px;flex:none;height:100vh;height:100dvh;z-index:50;transform:translateX(-105%);box-shadow:0 0 44px rgba(0,0,0,.55);overflow-y:auto;padding:18px 14px}
   body.nav-open .sidebar{transform:translateX(0)}
@@ -824,10 +836,12 @@ class Handler(BaseHTTPRequestHandler):
                 n = html.escape(x["name"])
                 ctl = ""
                 if role_at_least(role, "admin"):
-                    ctl = (f"<form method='post' action='/action/service' style='display:inline'><input type='hidden' name='name' value='{n}'>"
-                           f"<button class='small ghost' name='op' value='start'>Start</button> <button class='small ghost' name='op' value='stop'>Stop</button> <button class='small ghost' name='op' value='restart'>Restart</button></form> "
-                           f"<a class='btn ghost small' href='/services/logs?name={n}'>Logs</a>")
-                return f"<div class='svcrow'><span>{n}</span><span>{chip(x['status'])} {ctl}</span></div>"
+                    def _sb(op, label):
+                        return (f"<form method='post' action='/action/service'><input type='hidden' name='name' value='{n}'>"
+                                f"<button class='small ghost' name='op' value='{op}'>{label}</button></form>")
+                    ctl = (f"<div class='svcbtns'>{_sb('start', 'Start')}{_sb('stop', 'Stop')}{_sb('restart', 'Restart')}"
+                           f"<a class='btn ghost small' href='/services/logs?name={n}'>Logs</a></div>")
+                return (f"<div class='svcblk'><div class='svchead'><span class='svcname'>{n}</span>{chip(x['status'])}</div>{ctl}</div>")
             _svcs = service_list()
             rows = "".join(_svc_row(x) for x in _svcs)
             # --- Python Proxy card: the ws-proxy service under its product name,
@@ -837,23 +851,25 @@ class Handler(BaseHTTPRequestHandler):
             if not (1 <= _ws_port <= 65534): _ws_port = 8080
             _py_btns = ""
             if role_at_least(role, "admin"):
-                def _py_form(job, label, cls="small ghost", confirm=""):
+                def _py_form(job, label, cls="small ghost", confirm="", fcls=""):
                     oc = f" onsubmit=\"return confirm('{confirm}')\"" if confirm else ""
-                    return (f"<form method='post' action='/action/run' style='display:inline'{oc}>"
-                            f"<input type='hidden' name='job' value='{job}'><button class='{cls}'>{label}</button></form> ")
-                _py_btns = ("<p style='margin:12px 0 4px'>"
+                    fc = f" class='{fcls}'" if fcls else ""
+                    return (f"<form method='post' action='/action/run'{fc}{oc}>"
+                            f"<input type='hidden' name='job' value='{job}'><button class='{cls}'>{label}</button></form>")
+                _py_btns = ("<div class='svcbtns wide'>"
                             + _py_form("pyproxy-start", "Start") + _py_form("pyproxy-stop", "Stop") + _py_form("pyproxy-restart", "Restart")
-                            + _py_form("pyproxy-force-start", "Force Start", "danger", "Force Start kills anything still holding the proxy ports and starts the Python Proxy. Continue?")
-                            + _py_form("pyproxy-force-stop", "Force Stop", "danger", "Force Stop kills anything still holding the proxy ports and leaves the Python Proxy OFF. Continue?")
-                            + "</p>"
+                            + _py_form("pyproxy-force-start", "Force Start", "danger", "Force Start kills anything still holding the proxy ports and starts the Python Proxy. Continue?", "force")
+                            + _py_form("pyproxy-force-stop", "Force Stop", "danger", "Force Stop kills anything still holding the proxy ports and leaves the Python Proxy OFF. Continue?", "force")
+                            + "</div>"
                             f"<form method='post' action='/action/run' style='margin-top:10px'><input type='hidden' name='job' value='pyproxy-setport'>"
                             f"<label>Proxy port (the PROXY-protocol listener uses port + 1)</label>"
                             f"<input name='port' type='number' min='1' max='65535' value='{_ws_port}' style='width:130px;display:inline-block;margin-right:6px'>"
                             f"<button class='small'>Set Port</button></form>")
             pyproxy = (f"<div class='card'><h3>Python Proxy</h3>"
-                       f"<div class='svcrow'><span>ws-proxy service · WebSocket port <b>{_ws_port}</b> · PROXY-protocol port <b>{_ws_port + 1}</b></span>{chip(_ws_st)}</div>"
+                       f"<div class='svcblk'><div class='svchead'><span class='svcname'>ws-proxy</span>{chip(_ws_st)}</div>"
+                       f"<p class='mut' style='margin:8px 0 0'>ws-proxy service · WebSocket port <b>{_ws_port}</b> · PROXY-protocol port <b>{_ws_port + 1}</b></p>"
                        f"<p class='mut' style='margin-top:8px'>The Python proxy accepts SSH-over-WebSocket connections (path /sshws) and relays them to Dropbear. "
-                       f"Start / Stop / Restart / Force run with live output. Force is the heavy hand for when a normal start or stop does not work.</p>{_py_btns}</div>")
+                       f"Start / Stop / Restart / Force run with live output. Force is the heavy hand for when a normal start or stop does not work.</p>{_py_btns}</div></div>")
             ports = subprocess.getoutput("ss -tuln 2>/dev/null | head -n 40") if shutil.which("ss") else "ss is not available (local dev environment)"
             stack = ""
             if role_at_least(role, "admin"):
