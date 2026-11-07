@@ -4,7 +4,8 @@ VPS Manager Suite v1.0 - Web Panel (original code, stdlib only)
 Listen: HTTPS if cert exists else HTTP, default port 9090 (env VPSMGR_PORT)
 Data dir: env VPSMGR_DATA_DIR (default /var/lib/vps-manager, fallback for dev: ./data)
 Credentials: /etc/vps-manager/credentials.json if exists, else $DATA_DIR/credentials.json
-             Dev fallback: admin / admin123 (first run par file ban jati hai, password badal lo!)
+             Koi creds file na mile to RANDOM password generate hota hai (koi default
+             password NAHI hai) — woh ek dafa panel ke log/stdout me print hota hai.
 """
 import os, json, time, uuid, hashlib, secrets, subprocess, shutil, urllib.parse, html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,12 +46,24 @@ def load_creds():
             try:
                 with open(cand) as f: return json.load(f)
             except Exception: pass
-    # Dev fallback banao
-    creds = {"username": "admin", "password": "admin123"}
+    # Koi creds file nahi — random password banao (default password rakhna security bug hota)
+    creds = {"username": "admin", "password": secrets.token_urlsafe(12)}
     save_json("credentials.json", creds)
+    print(f"WARNING: credentials file nahi mili — naya admin password generate kiya: {creds['password']}  (data dir ki credentials.json me save hai, login karke badal lo)", flush=True)
     return creds
 
-def load_config(): return load_json("config.json", {"domain": "example.com", "banner": "Welcome to VPS Manager Suite", "qos_interface": "eth0", "qos_rate": "950mbit", "per_client_cap": "0"})
+def load_config(): return load_json("config.json", {"domain": "", "banner": "Welcome to VPS Manager Suite", "qos_interface": "eth0", "qos_rate": "950mbit", "per_client_cap": "0"})
+
+def sync_xray():
+    """Xray accounts ko asal xray config me bhejo (best-effort).
+    Panel sirf record rakhe aur Xray unko na pehchane — ye purana bug tha."""
+    for cand in ("/opt/vps-manager-suite/scripts/sync-xray.py",
+                 os.path.join(BASE, "..", "scripts", "sync-xray.py"),
+                 os.path.join(os.getcwd(), "scripts", "sync-xray.py")):
+        if os.path.exists(cand):
+            try: subprocess.run(["python3", cand, "--restart"], timeout=30, capture_output=True)
+            except Exception: pass
+            return
 def save_config(c): save_json("config.json", c)
 
 def log_activity(action):
@@ -199,10 +212,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = urllib.parse.urlparse(self.path).path
         if p == "/login":
-            return self.send_html(page("Login", "<div class='card login'><h2>Panel Login</h2><form method='post' action='/login'><label>Username</label><input name='username' required><label>Password</label><input name='password' type='password' required><button>Login Karo</button></form><p style='color:#94a3b8'>Dev fallback: admin / admin123 (pehli baar ke baad badal lo)</p></div>", nav=False))
+            return self.send_html(page("Login", "<div class='card login'><h2>Panel Login</h2><form method='post' action='/login'><label>Username</label><input name='username' required><label>Password</label><input name='password' type='password' required><button>Login Karo</button></form></div>", nav=False))
         user = self.session_user()
         if not user: return self.redirect("/login")
-        cfg = load_config(); domain = cfg.get("domain", "example.com")
+        cfg = load_config(); domain = cfg.get("domain") or ""
         if p == "/logout":
             c = SimpleCookie(self.headers.get("Cookie", ""))
             if "session" in c: SESSIONS.pop(c["session"].value, None)
@@ -216,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
             <div class='card'><h3>Disk</h3><p>{s.get('disk')}% used / {s.get('disk_total_gb')} GB</p></div>
             <div class='card'><h3>Network</h3><p>RX {s.get('net_rx_gb')} GB · TX {s.get('net_tx_gb')} GB</p></div>
             <div class='card'><h3>Accounts</h3><p>SSH: {len(ssh)}<br>Xray: {len(xr)}</p></div>
-            <div class='card'><h3>Services</h3><p>{active}/{len(svcs)} active &nbsp; <span class='ok'>●</span> {active}/9 services (panel count)</p></div>
+            <div class='card'><h3>Services</h3><p>{active}/{len(svcs)} services active</p></div>
             </div><div class='card'><h3>Server Info</h3><p>Domain: <code>{html.escape(domain)}</code><br>Panel Port: {PORT}<br>OS: {html.escape(os.uname().sysname)} {html.escape(os.uname().release)}<br>Hostname: {html.escape(os.uname().nodename)}</p></div>"""
             return self.send_html(page("Dashboard", body))
         if p == "/ssh":
@@ -228,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
                         f"<td>{html.escape(u.get('created',''))}</td><td>{account_status(u)}</td>"
                         f"<td><form method='post' action='/ssh/delete'><input type='hidden' name='username' value='{html.escape(u['username'])}'><button>Delete</button></form></td></tr>")
             rows = "".join(_ssh_row(u) for u in users)
-            payload = f"GET /ws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]"
+            payload = f"GET /sshws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]"
             body = f"""<h2>SSH Accounts</h2><div class='card'><h3>Create SSH User (tunnel-only)</h3><form method='post' action='/ssh/create'><input name='username' placeholder='Username' required><input name='password' placeholder='Password (blank = auto)'><label>Days</label><input name='expiry_days' type='number' min='0' value='30' placeholder='Days'><label>GB limit (0 = unlimited)</label><input name='gb_limit' type='number' min='0' value='0' placeholder='0 = unlimited'><label>IP limit (0 = unlimited)</label><input name='ip_limit' type='number' min='0' value='0' placeholder='0 = unlimited'><button>Create Karo</button></form><p style='color:#94a3b8'>Rule: <b>Days = literal count</b> (default 30, Expiry = creation + Days). Sirf <b>GB limit</b> aur <b>IP limit</b> par <b>0 = unlimited</b> hai. Example: Days 30 / GB 0 / IP 0 → Expiry: creation+30 days, Data: Unlimited, IP Limit: Unlimited.</p></div>
             <div class='card'><table><tr><th>User</th><th>Pass</th><th>Expiry</th><th>Data</th><th>Logins</th><th>Created</th><th>Status</th><th></th></tr>{rows}</table></div>
             <div class='card'><h3>Payload Example</h3><code>{html.escape(payload)}</code><p>Host: {html.escape(domain)} · SSH WS Port: 80/443 · Dropbear: 109, 143</p></div>"""
@@ -236,7 +249,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/xray":
             users = load_json("xray_users.json", [])
             def _xr_row(u):
-                return (f"<tr><td>{html.escape(u['protocol'])}</td><td>{html.escape(u['remark'])}</td><td><code>{html.escape(u['link'])}</code></td>"
+                _links = u.get('links') or {"Link TLS": u.get('link', '')}
+                _links_html = "<br>".join(f"<b>{html.escape(k)}:</b> <code>{html.escape(v)}</code>" for k, v in _links.items())
+                return (f"<tr><td>{html.escape(u['protocol'])}</td><td>{html.escape(u['remark'])}</td><td>{_links_html}</td>"
                         f"<td>{fmt_expiry(u.get('expiry_days',30))}<br><small>Expires: {expires_on(u.get('created',''), u.get('expiry_days',30))}</small></td>"
                         f"<td>{fmt_data(u.get('gb_limit',0))}</td><td>{fmt_logins(u.get('ip_limit',0))}</td><td>{account_status(u)}</td>"
                         f"<td><form method='post' action='/xray/delete'><input type='hidden' name='id' value='{u['id']}'><button>Delete</button></form></td></tr>")
@@ -280,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(page("OK", "<p>Login ho gaya... <a href='/'>Dashboard kholo</a></p>", nav=False), headers=[("Set-Cookie", f"session={tok}; HttpOnly; Path=/; SameSite=Lax")])
             log_activity("login failed"); return self.send_html(page("Login Fail", "<div class='card login'><p class='bad'>Galat username/password</p><a href='/login'>Dobara try karo</a></div>", nav=False), code=401)
         if not self.session_user(): return self.redirect("/login")
-        cfg = load_config(); domain = cfg.get("domain", "example.com")
+        cfg = load_config(); domain = cfg.get("domain") or ""
         if p == "/ssh/create":
             users = load_json("ssh_users.json", [])
             pwd = data.get("password") or secrets.token_urlsafe(9)
@@ -295,17 +310,35 @@ class Handler(BaseHTTPRequestHandler):
             users = [u for u in load_json("ssh_users.json", []) if u["username"] != data.get("username")]; save_json("ssh_users.json", users); log_activity(f"ssh delete {data.get('username')}"); return self.redirect("/ssh")
         if p == "/xray/create":
             users = load_json("xray_users.json", []); proto = data.get("protocol", "VLESS").lower(); uid = str(uuid.uuid4()); remark = data.get("remark", "user")
-            if proto == "vless": link = f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=ws&host={domain}&path=%2Fvless#{remark}"
-            elif proto == "trojan": link = f"trojan://{uid}@{domain}:443?security=tls&type=ws&host={domain}&path=%2Ftrojan#{remark}"
-            else: 
-                vm = {"v": "2", "ps": remark, "add": domain, "port": "443", "id": uid, "aid": "0", "net": "ws", "type": "none", "host": domain, "path": "/vmess", "tls": "tls"}
-                import base64; link = "vmess://" + base64.b64encode(json.dumps(vm).encode()).decode()
+            import base64
+            def _vmess_link(port, tls_on):
+                vm = {"v": "2", "ps": remark, "add": domain, "port": str(port), "id": uid, "aid": "0", "net": "ws", "type": "none", "host": domain, "path": "/vmess", "tls": "tls" if tls_on else ""}
+                return "vmess://" + base64.b64encode(json.dumps(vm).encode()).decode()
+            # Har account ke links — reference panel ki tarah.
+            # Chain: 443 -> HAProxy(SNI) -> Xray TLS fallback -> Nginx -> inbound
+            #        80  -> HAProxy -> Nginx -> inbound ; 8443 -> Xray TCP/TLS direct
+            if proto == "vless":
+                links = {
+                  "Link TLS": f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=ws&host={domain}&path=%2Fvless&sni={domain}#{remark}",
+                  "Link NTLS": f"vless://{uid}@{domain}:80?encryption=none&security=none&type=ws&host={domain}&path=%2Fvless#{remark}",
+                  "Link TCP": f"vless://{uid}@{domain}:8443?encryption=none&security=tls&type=tcp&headerType=none&sni={domain}#{remark}-tcp",
+                  "Link XHTTP TLS": f"vless://{uid}@{domain}:443?encryption=none&security=tls&type=xhttp&path=%2Fxhttp&host={domain}&mode=auto&sni={domain}#{remark}-xhttp-tls",
+                  "Link XHTTP NTLS": f"vless://{uid}@{domain}:80?encryption=none&security=none&type=xhttp&path=%2Fxhttp&host={domain}&mode=auto#{remark}-xhttp-ntls",
+                }
+            elif proto == "trojan":
+                links = {
+                  "Link TLS": f"trojan://{uid}@{domain}:443?security=tls&type=ws&host={domain}&path=%2Ftrojan&sni={domain}#{remark}",
+                  "Link NTLS": f"trojan://{uid}@{domain}:80?security=none&type=ws&host={domain}&path=%2Ftrojan#{remark}",
+                }
+            else:
+                links = {"Link TLS": _vmess_link(443, True), "Link NTLS": _vmess_link(80, False)}
+            link = links.get("Link TLS", "")
             exp = to_int(data.get("expiry_days", 30), 30); gb = to_int(data.get("gb_limit", 0), 0); ipl = to_int(data.get("ip_limit", 0), 0)
             created = time.strftime("%Y-%m-%d")
-            users.append({"id": uid, "protocol": proto, "remark": remark, "link": link, "expiry_days": exp, "gb_limit": gb, "ip_limit": ipl, "used_gb": 0, "created": created, "expires": expires_on(created, exp)})
-            save_json("xray_users.json", users); log_activity(f"xray create {proto} {remark}"); return self.redirect("/xray")
+            users.append({"id": uid, "protocol": proto, "remark": remark, "link": link, "links": links, "expiry_days": exp, "gb_limit": gb, "ip_limit": ipl, "used_gb": 0, "created": created, "expires": expires_on(created, exp)})
+            save_json("xray_users.json", users); log_activity(f"xray create {proto} {remark}"); sync_xray(); return self.redirect("/xray")
         if p == "/xray/delete":
-            users = [u for u in load_json("xray_users.json", []) if u["id"] != data.get("id")]; save_json("xray_users.json", users); log_activity("xray delete"); return self.redirect("/xray")
+            users = [u for u in load_json("xray_users.json", []) if u["id"] != data.get("id")]; save_json("xray_users.json", users); log_activity("xray delete"); sync_xray(); return self.redirect("/xray")
         if p == "/telegram":
             cfg.update({"telegram_token": data.get("telegram_token", ""), "telegram_admin_id": data.get("telegram_admin_id", "")}); save_config(cfg); log_activity("telegram config saved"); return self.redirect("/telegram")
         if p == "/settings":
@@ -318,7 +351,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception: pass
             log_activity("panel password changed"); return self.redirect("/settings")
         if p == "/action/fix":
-            out = subprocess.getoutput("bash scripts/fix-stack.sh 2>&1 | head -n 50") if os.path.exists("scripts/fix-stack.sh") else "Fix script VPS par chalega (local dev me placeholder). Services page par status dekho."
+            _fix = next((c for c in ("/opt/vps-manager-suite/scripts/fix-stack.sh", os.path.join(BASE, "..", "scripts", "fix-stack.sh"), "scripts/fix-stack.sh") if os.path.exists(c)), "")
+            out = subprocess.getoutput(f"bash {_fix} 2>&1 | head -n 50") if _fix else "Fix script is VPS par nahi mili (/opt/vps-manager-suite/scripts/fix-stack.sh). Pehle install/update chalao."
             log_activity("maintenance fix-stack"); return self.send_html(page("Fix", f"<div class='card'><pre>{html.escape(out)}</pre><a href='/services'>Back</a></div>"))
         if p == "/action/qos":
             log_activity("maintenance qos apply requested"); return self.send_html(page("QoS", "<div class='card'><p>QoS apply request log ho gayi. VPS par chalao: <code>sudo bash scripts/qos.sh</code></p><a href='/settings'>Back</a></div>"))
