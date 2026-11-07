@@ -326,7 +326,18 @@ def service_list():
         status = "unknown"
         try:
             r = subprocess.run(["systemctl", "is-active", n], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=3)
-            status = r.stdout.strip() or "inactive"
+            raw = r.stdout.strip()
+            # systemctl's contract: exit code 0 AND the word "active" mean
+            # the unit is running. Trust BOTH together, never the text
+            # alone - a stopped service must never render as "running".
+            # Non-active states keep their real word for the warn pill;
+            # anything unexpected counts as NOT running (safe direction).
+            if r.returncode == 0 and raw == "active":
+                status = "active"
+            elif raw in ("inactive", "failed", "activating", "deactivating"):
+                status = raw
+            else:
+                status = "inactive"
         except Exception:
             status = "n/a (no systemd)"
         out.append({"name": n, "status": status})
@@ -906,13 +917,42 @@ def acct_set_lock(acct, locked):
         acct.pop("disabled", None); acct.pop("disabled_reason", None); acct.pop("disabled_at", None)
     return acct
 
+TUNNEL_SHELL = "/bin/false"  # the one shell every suite SSH account uses
+OLD_TUNNEL_SHELLS = ("/usr/sbin/nologin", "/sbin/nologin")  # pre-fix panel/menu shell
+
+def _ensure_tunnel_shell():
+    """Dropbear rejects password logins for accounts whose shell is not
+    listed in /etc/shells ("invalid shell, rejected"), so the tunnel shell
+    must be a member before any account can log in. Best-effort."""
+    try:
+        try:
+            with open("/etc/shells") as f: listed = [ln.strip() for ln in f]
+        except Exception:
+            listed = []
+        if TUNNEL_SHELL not in listed:
+            with open("/etc/shells", "a") as f: f.write(TUNNEL_SHELL + "\n")
+    except Exception:
+        pass
+
 def system_user_create(username, password, expiry_ymd):
     """Create a real tunnel-only system user (root only). Best-effort: never raises."""
     if os.geteuid() != 0: return
     try:
+        _ensure_tunnel_shell()
         exists = subprocess.run(["id", username], stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+        if exists:
+            # Accounts created before the shell fix may still carry a
+            # nologin shell that Dropbear rejects - point them at the
+            # tunnel shell so the login works again.
+            try:
+                import pwd
+                if pwd.getpwnam(username).pw_shell in OLD_TUNNEL_SHELLS:
+                    subprocess.run(["usermod", "-s", TUNNEL_SHELL, username],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            except Exception:
+                pass
         if not exists:
-            r = subprocess.run(["useradd", "-M", "-s", "/usr/sbin/nologin", "-e", expiry_ymd, username],
+            r = subprocess.run(["useradd", "-M", "-s", TUNNEL_SHELL, "-e", expiry_ymd, username],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10)
             if r.returncode != 0:
                 log_activity(f"ssh useradd failed for {username}: {(r.stderr or '').strip()[:120]}")
@@ -1477,7 +1517,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             users = load_json("xray_users.json", []); uid = str(uuid.uuid4())
             # 5 links per account for every protocol (see build_links).
-            # Chain: 443 -> HAProxy (SNI) -> Xray TLS fallback -> Nginx -> inbound
+            # Chain: 443 -> HAProxy (TLS termination) -> Nginx -> inbound
             #         80 -> HAProxy -> Nginx -> inbound ; TCP/XHTTP-TLS ports -> Xray direct
             links = build_links(proto, uid, domain, remark)
             link = links.get("Link TLS", "")
