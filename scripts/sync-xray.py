@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """VPS Manager Suite - Xray config sync (original code)
 
-Panel/menu me bane hue Xray accounts (xray_users.json) ko asal Xray config
-(/usr/local/etc/xray/config.json) me daalta hai — pehle accounts sirf panel
-ke record me rehte thay, Xray unko pehchanta hi nahi tha.
+Writes Xray accounts created in the panel/menu (xray_users.json) into the
+real Xray config (/usr/local/etc/xray/config.json) — previously accounts
+only existed as panel records and Xray never knew them.
 
-- Template: suite ke templates/xray.json.tpl se (ya /opt/vps-manager-suite se)
-- __UUID__ ki jagah ek bootstrap UUID (data dir me bootstrap.json me save)
-- Har account ka UUID apne protocol wale inbounds me add hota hai:
+- Template: the suite's templates/xray.json.tpl (or from /opt/vps-manager-suite)
+- __UUID__ is replaced by a bootstrap UUID (saved in bootstrap.json in the data dir)
+- Each account's UUID is added to its protocol's inbounds:
   VLESS -> vless-ws, vless-xhttp, vless-tcp, tls-fallback
   VMess -> vmess-ws ; Trojan -> trojan-ws (password = account id)
-- Expired accounts skip hote hain
-- Config likhne ke baad `xray run -test` (binary ho to) aur --restart par service restart
+- Every client gets "email" = remark (sanitized) so Xray stats and the
+  access log attribute traffic to that account (used by limit-check)
+- Expired, disabled (by limit-check) and IP-blocked accounts are skipped
+- After writing, the config is tested with `xray run -test` (if the binary
+  exists) and the service is restarted on --restart
 
 Usage: python3 sync-xray.py [--restart]
 Env: VPSMGR_DATA_DIR, VPSMGR_XRAY_CONFIG, VPSMGR_XRAY_TEMPLATE
 """
-import json, os, sys, uuid, datetime, subprocess
+import json, os, re, sys, uuid, datetime, subprocess
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("VPSMGR_DATA_DIR", "/var/lib/vps-manager")
@@ -52,19 +55,40 @@ def is_expired(acct):
     except Exception:
         return False
 
+def stats_email(acct):
+    """Xray stats/log attribution ke liye per-user email.
+    limit-check.sh uses this exact same function — keep both in sync."""
+    e = re.sub(r"[^A-Za-z0-9@._\-]", "_", str(acct.get("remark") or acct.get("id") or ""))
+    return e or str(acct.get("id") or "")
+
+def ip_block_active(acct):
+    """limit-check sets ip_blocked_until (ISO datetime) when the IP limit is exceeded."""
+    until = acct.get("ip_blocked_until")
+    if not until:
+        return False
+    try:
+        return datetime.datetime.now() < datetime.datetime.fromisoformat(str(until))
+    except Exception:
+        return False
+
 def main():
     tpl_path = next((p for p in TPL_CANDIDATES if p and os.path.exists(p)), "")
     if not tpl_path:
-        print("sync-xray: template nahi mili, skip"); return 0
+        print("sync-xray: template not found, skip"); return 0
     with open(tpl_path) as f: raw = f.read()
     seed = bootstrap_uuid()
     cfg = json.loads(raw.replace("__UUID__", seed))
     accounts = load_json(os.path.join(DATA_DIR, "xray_users.json"), [])
     by_tag = {ib.get("tag"): ib for ib in cfg.get("inbounds", [])}
     added = 0
+    skipped = 0
     for a in accounts:
         uid = a.get("id")
-        if not uid or is_expired(a): continue
+        # Disabled (expiry/quota — limit-check) or IP-block active: NOT added to the config
+        if not uid or is_expired(a) or a.get("disabled") is True or ip_block_active(a):
+            skipped += 1
+            continue
+        email = stats_email(a)
         proto = (a.get("protocol") or "").lower()
         targets = []
         if proto == "vless": targets = ["vless-ws", "vless-xhttp", "vless-tcp", "tls-fallback"]
@@ -75,18 +99,27 @@ def main():
             if not ib: continue
             clients = ib.setdefault("settings", {}).setdefault("clients", [])
             if proto == "trojan":
-                if not any(c.get("password") == uid for c in clients):
-                    clients.append({"password": uid}); added += 1
+                ex = next((c for c in clients if c.get("password") == uid), None)
+                if ex is None:
+                    clients.append({"password": uid, "email": email}); added += 1
+                else:
+                    ex.setdefault("email", email)
             elif proto == "vmess":
-                if not any(c.get("id") == uid for c in clients):
-                    clients.append({"alterId": 0, "id": uid}); added += 1
+                ex = next((c for c in clients if c.get("id") == uid), None)
+                if ex is None:
+                    clients.append({"alterId": 0, "id": uid, "email": email}); added += 1
+                else:
+                    ex.setdefault("email", email)
             else:
-                if not any(c.get("id") == uid for c in clients):
-                    clients.append({"id": uid}); added += 1
+                ex = next((c for c in clients if c.get("id") == uid), None)
+                if ex is None:
+                    clients.append({"id": uid, "email": email}); added += 1
+                else:
+                    ex.setdefault("email", email)
     os.makedirs(os.path.dirname(OUT) or ".", exist_ok=True)
     with open(OUT, "w") as f: json.dump(cfg, f, indent=2)
-    print(f"sync-xray: config likh di -> {OUT} (seed + {added} account-clients, kul accounts: {len(accounts)})")
-    # Config test (binary ho to) — kharab config par purani service na giraye is liye pehle test
+    print(f"sync-xray: config written -> {OUT} (seed + {added} account-clients, total accounts: {len(accounts)}, skipped: {skipped})")
+    # Config test (if binary exists) — test first so a bad config never takes the running service down
     xray = subprocess.getoutput("command -v xray").strip()
     if xray:
         r = subprocess.run([xray, "run", "-test", "-c", OUT], capture_output=True, text=True)

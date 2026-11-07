@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Simple WebSocket -> SSH proxy (stdlib only).
-0.0.0.0:8080 par sunta hai (env WS_PROXY_PORT), Nginx ke /sshws route ke peeche
-istemaal hota hai, aur bytes ko Dropbear/SSH 127.0.0.1:109 par forward karta hai.
-WS handshake ka asal Sec-WebSocket-Accept (RFC 6455) calculate karke 101 deta
-hai, phir raw TCP tunnel bana deta hai.
+Listens on 0.0.0.0:8080 (env WS_PROXY_PORT), sits behind Nginx's /sshws
+route, and forwards bytes to Dropbear/SSH at 127.0.0.1:109.
+It computes the real Sec-WebSocket-Accept (RFC 6455), replies 101, and
+then becomes a raw TCP tunnel.
 """
 import socket, threading, select, os, hashlib, base64
 

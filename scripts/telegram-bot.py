@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """VPS Manager Suite - Telegram Bot (original, stdlib only)
-Config: /etc/vps-manager/config.json me telegram_token + telegram_admin_id
-Ya env: TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_ID
+Config: telegram_token + telegram_admin_id in /etc/vps-manager/config.json
+Or env: TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_ID
 Commands: /start /status /stats /users
-Token kabhi code me hardcode na karo.
+Never hardcode the token in the code.
 """
 import json, os, urllib.request, urllib.parse, time, subprocess
 
@@ -27,8 +27,8 @@ def api(token, method, **kw):
 def main():
     cfg = load_cfg()
     if not cfg["token"]:
-        print("Telegram token set nahi hai. Panel > Telegram Bot me token + admin ID save karo."); return
-    print("Bot polling start... (Ctrl+C to stop)")
+        print("The Telegram token is not set. Save the token + admin ID in Panel > Telegram Bot."); return
+    print("Bot polling started... (Ctrl+C to stop)")
     offset = None
     while True:
         try:
@@ -46,7 +46,7 @@ def main():
                 elif text.startswith("/stats"):
                     reply = subprocess.getoutput("free -h; df -h /")
                 elif text.startswith("/start"):
-                    reply = "VPS Manager Bot ready. /status bhejo."
+                    reply = "VPS Manager Bot is ready. Send /status."
                 api(cfg["token"], "sendMessage", chat_id=chat, text=reply[:4000])
         except KeyboardInterrupt: break
         except Exception as e: print("Error:", e); time.sleep(5)
