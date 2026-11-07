@@ -203,7 +203,7 @@ if [[ -n "$_upd_dom" ]]; then
       && echo "[update] nginx router re-rendered from the new template" || echo "[update] Warning: could not re-render /etc/nginx/nginx.conf"
   fi
   if [[ -d /etc/haproxy ]]; then
-    sed "s/__DOMAIN__/$_upd_dom/g; s/__WSPROXY_PORT__/$_upd_wsp/g" "$SUITE_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg 2>/dev/null \
+    sed "s/__DOMAIN__/$_upd_dom/g; s/__WSPROXY_PORT__/$_upd_wsp/g; s/__WSPROXY_PROXY_PORT__/$((_upd_wsp+1))/g" "$SUITE_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg 2>/dev/null \
       && echo "[update] haproxy config re-rendered (port 443 = TLS termination + CONNECT routing)" || echo "[update] Warning: could not re-render /etc/haproxy/haproxy.cfg"
   fi
 else

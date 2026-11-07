@@ -127,7 +127,7 @@ EOF
 # 6) Nginx internal router + HAProxy mux
 info "Applying the Nginx + HAProxy templates..."
 sed "s/__DOMAIN__/$DOMAIN/g; s/__PANEL_PORT__/9090/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/nginx.conf.tpl" > /etc/nginx/nginx.conf
-sed "s/__DOMAIN__/$DOMAIN/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg
+sed "s/__DOMAIN__/$DOMAIN/g; s/__WSPROXY_PORT__/$WS_PORT/g; s/__WSPROXY_PROXY_PORT__/$((WS_PORT+1))/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg
 nginx -t || warn "nginx config test warning"
 # HAProxy terminates TLS on 443 from the bundle $CONFIG_DIR/ssl/haproxy.pem.
 # On a reinstall the cert pair already exists, so the bundle can be built
