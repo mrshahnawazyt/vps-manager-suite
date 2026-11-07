@@ -24,6 +24,15 @@ if [[ ! -f "$SCRIPT_DIR/lib/common.sh" ]]; then
   tar -xzf "$_tmp/repo.tgz" --strip-components=1 -C "$_tmp/src"
   exec bash "$_tmp/src/install.sh" "$@"
 fi
+# --- Suite ko permanent jagah par rakho (/opt/vps-manager-suite) ---
+# Taaki vpsmenu, cron aur fix scripts hamesha sahi path se chalein —
+# tmp folder se install hua ho to bhi files waha se gayab na hon.
+SUITE_DIR="/opt/vps-manager-suite"
+if [[ "$SCRIPT_DIR" != "$SUITE_DIR" && -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+  mkdir -p "$SUITE_DIR"
+  cp -a "$SCRIPT_DIR/." "$SUITE_DIR/"
+  SCRIPT_DIR="$SUITE_DIR"
+fi
 source "$SCRIPT_DIR/lib/common.sh"
 
 require_root; check_os; ensure_dirs
@@ -153,7 +162,12 @@ EOF
 cat > /etc/cron.d/vps-manager-limits <<EOF
 */10 * * * * root bash $SCRIPT_DIR/scripts/limit-check.sh >> /var/log/vps-manager-limits.log 2>&1
 EOF
-install -m 755 "$SCRIPT_DIR/menu.sh" /usr/local/bin/vpsmenu 2>/dev/null || cp "$SCRIPT_DIR/menu.sh" /usr/local/bin/menu || true
+# vpsmenu / menu = chhota wrapper jo /opt wale suite folder se menu chalata hai
+# (akeli file copy karne se lib/common.sh nahi milta tha — is liye wrapper hai)
+for _cmd in vpsmenu menu; do
+  printf '#!/usr/bin/env bash\nexec bash %s/menu.sh "$@"\n' "$SCRIPT_DIR" > "/usr/local/bin/$_cmd"
+  chmod +x "/usr/local/bin/$_cmd"
+done
 
 # 12) Services enable + health check
 systemctl daemon-reload || true

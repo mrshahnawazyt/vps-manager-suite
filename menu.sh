@@ -4,8 +4,24 @@
 #   Days = literal count, default 30. Expiry = creation date + Days. (0 = 0 days, NOT unlimited)
 #   GB limit (0 = unlimited) | IP limit (0 = unlimited)
 set -u
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/lib/common.sh" 2>/dev/null || true
+# Symlink (/usr/local/bin/vpsmenu) se chale to asal file ka folder lo
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# common.sh dhoondo: script ke paas, warna /opt wale suite folder me
+for _lib in "$SCRIPT_DIR/lib/common.sh" "/opt/vps-manager-suite/lib/common.sh"; do
+  [[ -f "$_lib" ]] && { source "$_lib"; break; }
+done
+# Agar phir bhi common.sh na mile (akeli copy chal rahi ho) to basic functions
+# yahi bana lo taaki menu "command not found" diye baghair chale
+if ! declare -F banner >/dev/null 2>&1; then
+  banner(){ echo "=== $* ==="; }
+  info(){ echo "[INFO] $*"; }; warn(){ echo "[!] $*"; }; err(){ echo "[X] $*" >&2; }; ok(){ echo "[OK] $*"; }
+  gen_password(){ tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 14; echo; }
+  get_domain(){ python3 -c "import json;print(json.load(open('${VPSMGR_DATA_DIR:-/var/lib/vps-manager}/config.json')).get('domain',''))" 2>/dev/null || echo ""; }
+  save_config_key(){ :; }; dns_check(){ echo "DNS check skip (common.sh nahi mila)"; return 0; }
+  service_status(){ systemctl is-active "$1" 2>/dev/null || echo "unknown"; }
+  print_ports(){ ss -tulnp 2>/dev/null || netstat -tulnp 2>/dev/null || echo "ports nahi dikhe"; }
+  log_activity(){ :; }
+fi
 DATA="${VPSMGR_DATA_DIR:-/var/lib/vps-manager}"
 [[ -d "$DATA" ]] || DATA="$SCRIPT_DIR/data"
 mkdir -p "$DATA" 2>/dev/null || true
@@ -102,7 +118,24 @@ while true; do
     07|7) read -rp "Interface [eth0]: " iface; iface="${iface:-eth0}"; read -rp "Rate [950mbit]: " rate; rate="${rate:-950mbit}"; bash "$SCRIPT_DIR/scripts/qos.sh" "$iface" "$rate" || echo "QoS ke liye root chahiye"; pause ;;
     08|8) bash "$SCRIPT_DIR/scripts/speedtest.sh"; pause ;;
     09|9) echo "Telegram Bot: Panel > Telegram Bot me token + admin ID save karo, phir: python3 scripts/telegram-bot.py"; pause ;;
-    10) echo "Panel: https://$DOMAIN:9090  |  http://<server-ip>:9090"; echo "User: admin | Password: credentials file dekho (/etc/vps-manager/credentials.json ya panel data dir)"; echo "Port: 9090"; pause ;;
+    10) _ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}'); _cred=""
+      for _f in "/etc/vps-manager/credentials.json" "$DATA/credentials.json"; do [[ -f "$_f" ]] && { _cred="$_f"; break; }; done
+      echo " --- WEB PANEL ---"
+      echo " Panel : https://$DOMAIN:9090  |  http://$_ip:9090"
+      if [[ -n "$_cred" ]]; then
+        python3 - "$_cred" <<'PY'
+import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    print(f" User  : {d.get('username','admin')}")
+    print(f" Pass  : {d.get('password','(nahi mila)')}")
+except Exception:
+    print(" User  : admin"); print(" Pass  : (credentials file parh nahi paya)")
+PY
+      else
+        echo " User  : admin"; echo " Pass  : (credentials file nahi mili — pehle option 01 Install chalao)"
+      fi
+      echo " Port  : 9090"; pause ;;
     11) bash "$SCRIPT_DIR/uninstall.sh"; pause ;;
     12) echo "Allah Hafiz! Menu band."; exit 0 ;;
     *) echo "Galat option"; pause ;;
