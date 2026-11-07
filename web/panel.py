@@ -34,6 +34,17 @@ for _qd in (os.path.join(BASE, "..", "scripts"), "/opt/vps-manager-suite/scripts
     except Exception:
         _qr = None
 _QR_CACHE = {}
+# SSH Banner Designer renderer (scripts/banner_render.py) - turns the
+# structured banner design in config.json into the Dropbear banner file.
+_banner = None
+for _bd in (os.path.join(BASE, "..", "scripts"), "/opt/vps-manager-suite/scripts"):
+    try:
+        sys.path.insert(0, os.path.abspath(_bd))
+        import banner_render as _banner_mod
+        _banner = _banner_mod
+        break
+    except Exception:
+        _banner = None
 DATA_DIR = os.environ.get("VPSMGR_DATA_DIR", "/var/lib/vps-manager")
 # Local dev: if /var/lib is not writable, fall back to ./data
 try:
@@ -73,7 +84,7 @@ def load_creds():
     print(f"WARNING: no credentials file found - generated a new admin password: {creds['password']}  (saved in credentials.json in the data dir; log in and change it)", flush=True)
     return creds
 
-def load_config(): return load_json("config.json", {"domain": "", "banner": "Welcome to VPS Manager Suite", "qos_interface": "eth0", "qos_rate": "950mbit", "per_client_cap": "0"})
+def load_config(): return load_json("config.json", {"domain": "", "banner": "DDK VPS Manager", "qos_interface": "eth0", "qos_rate": "950mbit", "per_client_cap": "0"})
 
 def _pipe_lines(argv, emit):
     """Run argv and hand each output line to emit() THE MOMENT it is produced
@@ -123,6 +134,173 @@ def log_activity(action):
     logs.insert(0, {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "action": action,
                     "admin": getattr(CTX, "user", "") or "", "ip": getattr(CTX, "ip", "") or ""})
     save_json("activity.json", logs[:300])
+
+# --- SSH Banner Designer -----------------------------------------------------
+# Dropbear serves /etc/vps-manager/banner.txt as the pre-auth "server
+# message". The designer stores a structured design in config (key
+# "banner_design") and rewrites that file, rendered with ANSI colors, on
+# every save. The terminal menu and the Telegram bot still write plain
+# text to the same file - effective_banner_design() detects that (the file
+# no longer matches the stored design's render) and the designer then
+# opens in Plain style showing the live text, instead of stale fields.
+BANNER_FILE = os.environ.get("VPSMGR_BANNER_FILE", "/etc/vps-manager/banner.txt")
+
+def _banner_targets():
+    out = []
+    for cand in (BANNER_FILE, path("banner.txt")):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+def read_live_banner():
+    """Current banner file content (str) or None when no file exists."""
+    for cand in _banner_targets():
+        try:
+            if os.path.exists(cand):
+                with open(cand, "rb") as f:
+                    return f.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+    return None
+
+def write_live_banner(rendered):
+    """Write the rendered banner (str) to the live banner file.
+    Returns (path_written, error)."""
+    data = (rendered + "\n").encode("utf-8")
+    err = ""
+    for cand in _banner_targets():
+        try:
+            d = os.path.dirname(cand)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(cand, "wb") as f:
+                f.write(data)
+            return cand, ""
+        except Exception as e:
+            err = str(e)
+    return "", err
+
+def effective_banner_design(cfg):
+    """-> (design, source): the design the designer form should show.
+    source is "design" when the stored design is in charge (no live file,
+    or the live file is exactly its render) and "live" when the banner
+    file holds other (plain) text - e.g. set from the menu or the bot."""
+    design = None
+    raw = cfg.get("banner_design")
+    if _banner is not None and isinstance(raw, dict):
+        try:
+            design = _banner.normalize_design(raw)
+        except Exception:
+            design = None
+    live = read_live_banner()
+    if design is not None:
+        if live is None or live.rstrip("\n") == _banner.render(design):
+            return design, "design"
+    if live is not None and live.strip():
+        if live.strip() == "Welcome to VPS Manager Suite":
+            # The pre-rebrand stock one-liner: offer the new styled default.
+            return _banner.default_design("DDK VPS Manager"), "legacy"
+        return _banner.design_from_plain(live, style="plain"), "live"
+    if design is not None:
+        return design, "design"
+    text = cfg.get("banner", "") or "DDK VPS Manager"
+    if str(text).strip() == "Welcome to VPS Manager Suite":
+        return _banner.default_design("DDK VPS Manager"), "legacy"
+    return _banner.design_from_plain(text, style="box"), "legacy"
+
+def banner_design_from_form(data):
+    lines = []
+    for i in range(6):
+        lines.append({"text": data.get("bd_line_%d" % i, ""),
+                      "color": data.get("bd_color_%d" % i, "white")})
+    return _banner.normalize_design({
+        "title": data.get("bd_title", ""),
+        "style": data.get("bd_style", "box"),
+        "scheme": data.get("bd_scheme", "gold"),
+        "lines": lines})
+
+def save_banner_design(cfg, design, emit=None):
+    """Store the design in config AND rewrite the live banner file at once.
+    emit (optional) narrates the steps for the popup stream."""
+    cfg["banner_design"] = design
+    if design.get("title"):
+        cfg["banner"] = design["title"]
+    save_config(cfg)
+    if emit:
+        emit("[OK] Design saved - style '%s', scheme '%s'" % (design["style"], design["scheme"]))
+    target, err = write_live_banner(_banner.render(design))
+    if target:
+        log_activity("banner design saved (%s/%s)" % (design["style"], design["scheme"]))
+        if emit:
+            emit("[OK] Banner file updated: %s" % target)
+            emit("[OK] Clients see the new banner on their next connection - no restart needed.")
+    else:
+        log_activity("banner design saved but the banner file write failed")
+        if emit:
+            emit("[ERROR] The design is saved, but the banner file could not be written (%s)." % err)
+            emit("[ERROR] Check the permissions of /etc/vps-manager/banner.txt.")
+    return target
+
+def banner_designer_card(cfg):
+    """The Settings-page 'SSH Banner Designer' card (form + live preview)."""
+    if _banner is None:
+        return ("<div class='card'><h3>SSH Banner Designer</h3>"
+                "<p class='bad'>The banner renderer (scripts/banner_render.py) was not found. Run vpsupdate, then reload this page.</p></div>")
+    design, source = effective_banner_design(cfg)
+    def opts(items, cur):
+        out = []
+        for val, label, css in items:
+            sel = " selected" if val == cur else ""
+            sty = " style='color:%s'" % css if css else ""
+            out.append("<option value='%s'%s%s>%s</option>" % (
+                html.escape(val, quote=True), sel, sty, html.escape(label)))
+        return "".join(out)
+    style_items = [("box", "Box Frame", ""), ("bigtitle", "Big Title + Box", ""),
+                   ("lines", "Colored Lines (no frame)", ""), ("plain", "Plain Text", "")]
+    scheme_items = [(name, name.title(), _banner.COLORS[_banner.SCHEMES[name][1]][1])
+                    for name in ("gold", "cyan", "green", "magenta", "red", "blue", "white")]
+    color_items = [(name, name.title(), pair[1]) for name, pair in _banner.COLORS.items()]
+    lines = list(design["lines"])
+    while len(lines) < 6:
+        lines.append({"text": "", "color": "white"})
+    rows = []
+    for i in range(6):
+        ln = lines[i]
+        rows.append(
+            "<div class='bdrow'><div><label>Line %d text</label>"
+            "<input name='bd_line_%d' id='bd_line_%d' value='%s' maxlength='100' placeholder='Line %d (blank = not shown)'>"
+            "</div><div><label>Color</label>"
+            "<select name='bd_color_%d' id='bd_color_%d'>%s</select></div></div>" % (
+                i + 1, i, i, html.escape(ln["text"], quote=True), i + 1,
+                i, i, opts(color_items, ln["color"])))
+    note = ""
+    if source == "live":
+        note = ("<p class='mut'>The live banner right now is plain text - it was set from the terminal "
+                "menu or the Telegram bot, or was never styled - so it is loaded above as Plain style. "
+                "Pick a style and save to replace it with a styled banner.</p>")
+    preview = _banner.to_html(_banner.render(design))
+    return ("<div class='card'><h3>SSH Banner Designer</h3>"
+            "<p class='mut'>This is the server message SSH apps (HTTP Custom, DarkTunnel, NPV Tunnel) "
+            "show while connecting. Style it here - colors, a box frame, a big title - and watch the "
+            "live preview: it is rendered by the same code that writes the banner file, so what you "
+            "see is exactly what clients get.</p>"
+            "<form method='post' action='/settings/banner' id='bd_form' data-stream='SSH Banner Designer' data-reload>"
+            "<label>Title</label>"
+            "<input name='bd_title' id='bd_title' value='%s' maxlength='80' placeholder='Your brand name'>"
+            "<div class='bdgrid'><div><label>Style</label>"
+            "<select name='bd_style' id='bd_style'>%s</select></div>"
+            "<div><label>Color scheme (frame &amp; title)</label>"
+            "<select name='bd_scheme' id='bd_scheme'>%s</select></div></div>"
+            "%s"
+            "<label>Live preview</label>"
+            "<pre class='bannerprev' id='bd_preview'>%s</pre>"
+            "<p class='mut'>Tip: start a line with an emoji, for example ⚡ 🚫 📢 📌 - the frame "
+            "alignment already accounts for emoji width.</p>"
+            "<button>Save Banner Design</button></form>%s</div>") % (
+                html.escape(design["title"], quote=True),
+                opts(style_items, design["style"]),
+                opts(scheme_items, design["scheme"]),
+                "".join(rows), preview, note)
 
 # --- Panel admins: multi-admin with roles ------------------------------------
 # credentials.json is the bootstrap Super Admin (Settings / terminal managed,
@@ -438,6 +616,15 @@ pre.raw{background:#05070a;border:1px solid var(--line);border-radius:12px;paddi
 .svcbtns.wide{grid-template-columns:repeat(6,1fr)}
 .svcbtns.wide form{grid-column:span 2}
 .svcbtns.wide form.force{grid-column:span 3}
+.brand{min-width:0}
+.brand .bt{font-size:16px;line-height:1.15;min-width:0;overflow-wrap:break-word}
+.sidefoot .tglink{display:flex;align-items:center;gap:8px;color:var(--acc2);font-size:13px;font-weight:600;padding:0 0 8px}
+.sidefoot .tglink:hover{color:var(--acc)}
+.sidefoot .tg-ic{font-size:14px}
+.bannerprev{background:#05070a;border:1px solid var(--line);border-radius:12px;padding:14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.55;overflow-x:auto;white-space:pre;margin:4px 0 10px;min-height:64px;color:#dbe4ee}
+.bdgrid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.bdrow{display:grid;grid-template-columns:1fr 168px;gap:0 12px}
+@media (max-width:640px){.bdgrid,.bdrow{grid-template-columns:1fr}}
 #pop-overlay{position:fixed;inset:0;background:rgba(2,6,10,.74);display:none;align-items:flex-start;justify-content:center;z-index:90;padding:26px 14px;overflow-y:auto}
 #pop-overlay.open{display:flex}
 .pop{background:var(--card);border:1px solid var(--line);border-radius:16px;width:100%;max-width:700px;box-shadow:0 18px 60px rgba(0,0,0,.6);overflow:hidden;margin-bottom:26px}
@@ -649,6 +836,28 @@ document.addEventListener('submit', function(ev){
   });
 });
 document.addEventListener('keydown', function(ev){ if(ev.key === 'Escape') closePop(); });
+
+/* --- SSH Banner Designer live preview (Settings page only) -----------------
+   While the admin edits the designer form, ask the server to re-render the
+   preview with the REAL renderer - the same code that writes the banner
+   file - so the preview is exactly what SSH clients will see. Guarded by
+   element presence: on every other page this does nothing. */
+(function(){
+  var form = document.getElementById('bd_form'); if(!form) return;
+  var prev = document.getElementById('bd_preview'); if(!prev) return;
+  var timer = null, seq = 0;
+  function refresh(){
+    var my = ++seq;
+    var parts = [];
+    new FormData(form).forEach(function(v, k){ parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(v)); });
+    fetch('/settings/banner-preview', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: parts.join('&')})
+      .then(function(r){ return r.text(); })
+      .then(function(t){ if(my === seq) prev.innerHTML = t; })
+      .catch(function(){});
+  }
+  form.addEventListener('input', function(){ if(timer) clearTimeout(timer); timer = setTimeout(refresh, 250); });
+  form.addEventListener('change', refresh);
+})();
 </script>"""
 
 POPUP_HTML = ("<div id='pop-overlay' onclick='if(event.target===this)closePop()'>"
@@ -672,14 +881,14 @@ NAV_ITEMS = [
     ("/logout", "Logout", "⏻"),
 ]
 
-BRAND = ("<div class='brand'><span class='mark'>V</span>"
-         "<span class='bt'>VPS Manager<small>SUITE V1.0</small></span></div>")
+BRAND = ("<div class='brand'><span class='mark'>D</span>"
+         "<span class='bt'>DDK VPS Manager<small>SUITE V1.0</small></span></div>")
 
 def page(title, body, nav=True, active="", user=""):
     if not nav:
         return ("<!doctype html><html><head><meta charset='utf-8'>"
                 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-                f"<title>{html.escape(title)} - VPS Manager</title>{CSS}</head>"
+                f"<title>{html.escape(title)} - DDK VPS Manager</title>{CSS}</head>"
                 f"<body><div class='loginwrap'>{body}</div>{JS}</body></html>")
     links = "".join(
         f"<a href='{href}' class='{'active' if href == active else ''}' onclick='toggleNav(false)'><span class='ic'>{ic}</span>{label}</a>"
@@ -689,13 +898,14 @@ def page(title, body, nav=True, active="", user=""):
     user_chip = f"<span class='chip'>👤 {html.escape(user or 'admin')}</span>" if user else ""
     return ("<!doctype html><html><head><meta charset='utf-8'>"
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-            f"<title>{html.escape(title)} - VPS Manager</title>{CSS}</head><body>"
+            f"<title>{html.escape(title)} - DDK VPS Manager</title>{CSS}</head><body>"
             "<div id='nav-overlay' onclick='toggleNav(false)'></div>"
             "<div class='layout'>"
             f"<aside class='sidebar' id='sidebar'><div class='sidehead'>{BRAND}"
             "<button type='button' class='closebtn' onclick='toggleNav(false)' aria-label='Close menu'>✕</button></div>"
             f"<div class='navlabel'>Menu</div><nav class='snav'>{links}</nav>"
-            "<div class='sidefoot'>Web Panel · Port " + str(PORT) + "</div></aside>"
+            "<div class='sidefoot'><a class='tglink' href='https://t.me/ddktrick2' target='_blank' rel='noopener'><span class='tg-ic'>✈</span>Telegram: @ddktrick2</a>"
+            "<div>Web Panel · Port " + str(PORT) + "</div></div></aside>"
             "<div class='main'>"
             f"<div class='topbar'><button type='button' class='burger' onclick='toggleNav()' aria-label='Open menu'>☰</button><span class='title'>{html.escape(title)}</span><span class='sp'></span>{dom_chip}{user_chip}"
             "<a class='btn ghost small' href='javascript:location.reload()'>Refresh</a></div>"
@@ -1337,13 +1547,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html(page("Telegram Bot", f"<div class='card'><h3>Telegram Bot Setup</h3><form method='post' action='/telegram'><label>Bot Token</label><input name='telegram_token' value='{html.escape(cfg.get('telegram_token',''))}' placeholder='Token from @BotFather'><label>Admin Chat ID</label><input name='telegram_admin_id' value='{html.escape(cfg.get('telegram_admin_id',''))}'><button>Save</button></form><p class='mut'>To run the bot on the VPS: <code>python3 scripts/telegram-bot.py</code> - the token is stored here, never hardcoded in code.</p></div>", active="/telegram", user=user))
         if p == "/settings":
             cfg = load_config()
+            designer = banner_designer_card(cfg)
             return self.send_html(page("Settings", f"""<div class='card'><h3>Settings</h3><form method='post' action='/settings' data-stream='Settings' data-reload>
             <label>Domain</label><input name='domain' value='{html.escape(cfg.get('domain',''))}'>
-            <label>SSH Banner</label><textarea name='banner'>{html.escape(cfg.get('banner',''))}</textarea>
+            <p class='mut'>The SSH banner (the server message clients see) is styled in the SSH Banner Designer below.</p>
             <label>Ping QoS Interface</label><input name='qos_interface' value='{html.escape(cfg.get('qos_interface','eth0'))}'>
             <label>QoS Rate</label><input name='qos_rate' value='{html.escape(cfg.get('qos_rate','950mbit'))}'>
             <label>Per-client cap (Mbps, 0 = no cap)</label><input name='per_client_cap' value='{html.escape(str(cfg.get('per_client_cap','0')))}'>
             <button>Save Settings</button></form></div>
+            {designer}
             <div class='card'><h3>Maintenance</h3><form method='post' action='/action/fix' style='display:inline' data-stream='Fix Stack' data-reload><button>Fix Stack</button></form> <form method='post' action='/action/qos' style='display:inline' data-stream='Apply QoS' data-reload><button class='ghost'>Apply QoS</button></form> <form method='post' action='/action/qos-off' style='display:inline' data-stream='Remove QoS' data-reload><button class='ghost'>Remove QoS</button></form></div>
             <div class='card'><h3>QoS Status</h3><pre class='raw'>{html.escape(subprocess.getoutput(('bash ' + suite_script('qos.sh') + ' status') if suite_script('qos.sh') else 'echo qos.sh not found'))}</pre></div>
             <div class='card'><h3>SSL Certificate</h3><pre class='raw'>{html.escape(subprocess.getoutput(('bash ' + suite_script('ssl.sh') + ' status') if suite_script('ssl.sh') else 'echo ssl helper not found'))}</pre><form method='post' action='/action/run' style='display:inline' data-stream='Issue / Renew SSL' data-reload><input type='hidden' name='job' value='ssl'><button class='ghost'>Issue / Renew SSL</button></form></div>
@@ -1704,6 +1916,28 @@ class Handler(BaseHTTPRequestHandler):
                 if sd:
                     log_activity(f"domain change {old_domain} -> {new_domain} (re-provisioning)")
                     return self.stream_cmd("Domain Change - Re-provisioning", ["bash", sd, new_domain], back="/settings")
+            return self.redirect("/settings")
+        if p == "/settings/banner-preview":
+            # Live preview for the Banner Designer: render the posted fields
+            # with the real renderer and return colored HTML for the <pre>.
+            if _banner is None:
+                return self.send_html("Preview unavailable - the banner renderer was not found.")
+            return self.send_html(_banner.to_html(_banner.render(banner_design_from_form(data))))
+        if p == "/settings/banner":
+            if _banner is None:
+                if self.wants_popup():
+                    emit, _result = self.stream_open()
+                    emit("[ERROR] The banner renderer (scripts/banner_render.py) was not found - run vpsupdate first. Nothing was saved.")
+                    return
+                return self.redirect("/settings")
+            design = banner_design_from_form(data)
+            if self.wants_popup():
+                emit, _result = self.stream_open()
+                emit("[INFO] Saving the SSH banner design...")
+                save_banner_design(cfg, design, emit)
+                emit("[OK] Done - close this popup to refresh the page.")
+                return
+            save_banner_design(cfg, design)
             return self.redirect("/settings")
         if p == "/password":
             creds = load_creds(); creds["password"] = data.get("new_password", ""); save_json("credentials.json", creds)
