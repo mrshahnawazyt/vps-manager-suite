@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VPS Manager Suite v1.0 - Installer (ORIGINAL code, Ubuntu 22.04)
+# VPS Manager Suite v1.0 - Installer (ORIGINAL code, Ubuntu 20.04 - 25.x)
 # Features: Dropbear, ws-proxy, Nginx internal router, HAProxy 80/443 mux,
 #           Xray (VMess/VLESS/Trojan, WS/TLS/TCP/XHTTP), CAKE QoS, SSL, Web Panel 9090
 # Limit rule (corrected, video-verified): Days = literal (default 30, Expiry = creation + Days). Sirf GB limit aur IP limit par 0 = Unlimited.
@@ -52,7 +52,13 @@ apt-get update -y
 # Note: ufw jaan-boojh kar NAHI lagaya — installer firewall enable nahi karta,
 # warna 9090/443 jaise ports band hone ka risk hota hai. openssl zaroori hai
 # (self-signed fallback aur Xray/Panel ke cert ke liye).
-apt-get install -y curl wget unzip jq nginx haproxy dropbear stunnel4 certbot python3 python3-pip iproute2 openssl speedtest-cli uuid-runtime cron || apt-get install -y curl wget unzip jq nginx haproxy dropbear certbot python3 iproute2 openssl cron
+# Core packages: ye har supported Ubuntu (20.04 - 25.x) par milte hain.
+apt-get install -y curl wget unzip jq nginx haproxy dropbear certbot python3 python3-pip iproute2 openssl uuid-runtime cron
+# Optional packages: kuch versions me naam/availability alag hoti hai —
+# na milein to skip kar do, baaki install nahi rukega.
+for _pkg in stunnel4 speedtest-cli; do
+  apt-get install -y "$_pkg" 2>/dev/null || warn "$_pkg is version me nahi mila — skip."
+done
 
 # 3) Panel credentials banao (agar pehle nahi hain)
 PANEL_USER="admin"; PANEL_PASS=""
@@ -197,28 +203,40 @@ log_activity "install completed for $DOMAIN"
 banner "INSTALL COMPLETE — Summary (video style)"
 # Panel ka sahi URL: cert hai to panel SIRF HTTPS par hai (http wala link dead hoga)
 if [[ -s "$CONFIG_DIR/ssl/fullchain.pem" && -s "$CONFIG_DIR/ssl/privkey.pem" ]]; then
-  PANEL_LINE="https://$DOMAIN:9090   (panel sirf HTTPS par hai — http:// wala link NAHI chalega)"
+  PANEL_LINE="https://$DOMAIN:9090"
+  PANEL_NOTE="Sirf HTTPS - http wala link nahi chalega"
 else
-  PANEL_LINE="http://${IP:-127.0.0.1}:9090   (SSL nahi bana, is liye panel HTTP par hai; bahar se kholne ke liye is IP ki jagah apni asal server IP lagao)"
+  PANEL_LINE="http://${IP:-127.0.0.1}:9090"
+  PANEL_NOTE="SSL nahi bana - panel HTTP par hai"
 fi
 cat <<EOF
-  Domain          : $DOMAIN
-  Server IP       : ${IP:-detect nahi hua}
-  Panel URL       : $PANEL_LINE
-  Panel Username  : admin
-  Panel Password  : $PANEL_PASS
-  Credentials file: $CREDS_FILE  (aur $DATA_DIR/credentials.json)
-  SSH Dropbear    : 109, 143
-  SSH WS (HTTP)   : 80   |  SSH WS+SSL / Xray TLS: 443
-  ws-proxy        : 8080 (internal -> 109)
-  Nginx internal  : 127.0.0.1:18080
-  Xray            : VMess /vmess · VLESS /vless · Trojan /trojan · XHTTP /xhttp
-  Services        : nginx, haproxy, xray, dropbear, ws-proxy, vps-panel (check: menu option 05)
-  Account Limits  : Days = literal (default 30) -> Expiry = creation + Days
-                    GB limit (0 = unlimited) | IP limit (0 = unlimited)
-                    Example: Days 30 / GB 0 / IP 0 -> Expiry creation+30d, Data: Unlimited, IP: Unlimited
-  Suite Expiry    : $EXPIRY_DATE (reminder only)
-  Menu chalao     : bash menu.sh   ya   vpsmenu
+  Domain       : $DOMAIN
+  Server IP    : ${IP:-detect nahi hua}
+  Panel URL    : $PANEL_LINE
+                 $PANEL_NOTE
+  Username     : admin
+  Password     : $PANEL_PASS
+  Creds file   : $CREDS_FILE
+                 (aur $DATA_DIR/credentials.json)
+  SSH Dropbear : 109, 143
+  SSH WS       : 80 (HTTP) | 443 (WS+SSL/TLS)
+  ws-proxy     : 8080 (internal -> 109)
+  Nginx        : 127.0.0.1:18080 (internal)
+  Xray         : VMess /vmess, VLESS /vless
+                 Trojan /trojan, XHTTP /xhttp
+  Services     : nginx, haproxy, xray,
+                 dropbear, ws-proxy, vps-panel
+                 (check: menu option 05)
+  Limits       : Days = literal (default 30)
+                 Expiry = creation + Days
+                 GB limit (0 = unlimited)
+                 IP limit (0 = unlimited)
+                 Ex: Days 30 / GB 0 / IP 0 ->
+                 Expiry +30d, Data: Unlimited,
+                 IP Limit: Unlimited
+  Suite Expiry : $EXPIRY_DATE (reminder only)
+  Menu chalao  : vpsmenu  ya  bash menu.sh
 EOF
 print_ports
-ok "Ho gaya! Panel kholo, login karo, aur Settings me jaake password confirm/badlo."
+ok "Ho gaya! Panel kholo aur login karo."
+echo "Settings me jaake password confirm/badlo."

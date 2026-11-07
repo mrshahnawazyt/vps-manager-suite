@@ -29,8 +29,16 @@ DOMAIN="$(get_domain)"; [[ -z "$DOMAIN" ]] && DOMAIN=$(python3 -c "import json;p
 
 pause(){ read -rp "Enter dabao wapas menu ke liye..." _; }
 
+# --- Display helpers: single column, har line max 46 chars (phone terminal) ---
+BOX_EDGE="+--------------------------------------------+"
+box_line(){ printf '| %-42s |\n' "$1"; }
+box_center(){
+  local _t="$1" _p=$(( (42 - ${#1}) / 2 ))
+  printf '| %*s%s%*s |\n' "$_p" '' "$_t" $((42 - ${#1} - _p)) ''
+}
+
 add_ssh_user(){
-  echo "--- Create SSH Account (tunnel-only) ---"
+  echo "$BOX_EDGE"; box_center "Create SSH (tunnel-only)"; echo "$BOX_EDGE"
   read -rp "Username: " u; [[ -z "$u" ]] && return
   read -rp "Password (blank = auto): " pw; [[ -z "$pw" ]] && pw=$(gen_password)
   read -rp "Days [30]: " days; days="${days:-30}"
@@ -41,7 +49,7 @@ add_ssh_user(){
     id "$u" >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin -e "$(date -d "+${days} days" +%F)" "$u" 2>/dev/null || warn "useradd skip/fail"
     echo "$u:$pw" | chpasswd 2>/dev/null || true
   fi
-  python3 - "$DATA" "$u" "$pw" "$days" "$gb" "$ip" <<'PY'
+  _out=$(python3 - "$DATA" "$u" "$pw" "$days" "$gb" "$ip" <<'PY'
 import json,os,sys,datetime
 data,u,pw,days,gb,ip=sys.argv[1:7]
 days=int(days); gb=int(gb); ip=int(ip)
@@ -49,20 +57,29 @@ created=datetime.date.today()
 rec={"username":u,"password":pw,"expiry_days":days,"gb_limit":gb,"ip_limit":ip,"used_gb":0,"created":created.isoformat(),"expires":(created+datetime.timedelta(days=days)).isoformat()}
 p=os.path.join(data,"ssh_users.json"); arr=json.load(open(p)) if os.path.exists(p) else []
 arr.append(rec); json.dump(arr,open(p,"w"),indent=2)
-print(f"Created: {u} | Expiry: {rec['expires']} | Data: {'Unlimited' if gb==0 else str(gb)+' GB'} | IP Limit: {'Unlimited' if ip==0 else ip}")
+print(f"User   : {u}")
+print(f"Pass   : {pw}")
+print(f"Expiry : {rec['expires']}")
+print(f"Data   : {'Unlimited' if gb==0 else str(gb)+' GB'}")
+print(f"IP Lim : {'Unlimited' if ip==0 else ip}")
 PY
-  echo "Payload: GET /sshws HTTP/1.1[crlf]Host: $DOMAIN[crlf]Upgrade: websocket[crlf][crlf]"
+)
+  echo "$BOX_EDGE"; box_center "SSH ACCOUNT READY"; echo "$BOX_EDGE"
+  while IFS= read -r _l; do [[ -n "$_l" ]] && box_line "$_l"; done <<< "$_out"
+  echo "$BOX_EDGE"
+  echo "Payload (copy):"
+  echo "GET /sshws HTTP/1.1[crlf]Host: $DOMAIN[crlf]Upgrade: websocket[crlf][crlf]"
   log_activity "menu ssh create $u days=$days gb=$gb ip=$ip"; pause
 }
 
 add_xray_user(){
-  echo "--- Create Xray Account ---"
+  echo "$BOX_EDGE"; box_center "Create Xray Account"; echo "$BOX_EDGE"
   read -rp "Protocol (VMess/VLESS/Trojan) [VLESS]: " proto; proto="${proto:-VLESS}"
   read -rp "Remark/Naam: " remark; [[ -z "$remark" ]] && return
   read -rp "Days [30]: " days; days="${days:-30}"
   read -rp "GB limit (0 = unlimited) [0]: " gb; gb="${gb:-0}"
   read -rp "IP limit (0 = unlimited) [0]: " ip; ip="${ip:-0}"
-  python3 - "$DATA" "$proto" "$remark" "$days" "$gb" "$ip" "$DOMAIN" <<'PY'
+  _out=$(python3 - "$DATA" "$proto" "$remark" "$days" "$gb" "$ip" "$DOMAIN" <<'PY'
 import json,os,sys,uuid,base64,datetime
 data,proto,remark,days,gb,ip,domain=sys.argv[1:8]
 days=int(days); gb=int(gb); ip=int(ip); uid=str(uuid.uuid4()); proto_l=proto.lower()
@@ -87,70 +104,130 @@ created=datetime.date.today()
 rec={"id":uid,"protocol":proto_l,"remark":remark,"link":link,"links":links,"expiry_days":days,"gb_limit":gb,"ip_limit":ip,"used_gb":0,"created":created.isoformat(),"expires":(created+datetime.timedelta(days=days)).isoformat()}
 p=os.path.join(data,"xray_users.json"); arr=json.load(open(p)) if os.path.exists(p) else []
 arr.append(rec); json.dump(arr,open(p,"w"),indent=2)
+print(f"Remark : {remark}")
+print(f"Proto  : {proto_l}")
+print(f"Expiry : {rec['expires']}")
+print(f"Data   : {'Unlimited' if gb==0 else str(gb)+' GB'}")
+print(f"IP Lim : {'Unlimited' if ip==0 else ip}")
+print("==LINKS==")
 for k,v in links.items(): print(f"{k}: {v}")
-print(f"Expiry: {rec['expires']} | Data: {'Unlimited' if gb==0 else str(gb)+' GB'} | IP Limit: {'Unlimited' if ip==0 else ip}")
 PY
+)
+  echo "$BOX_EDGE"; box_center "XRAY ACCOUNT READY"; echo "$BOX_EDGE"
+  _inlinks=0
+  while IFS= read -r _l; do
+    if [[ "$_l" == "==LINKS==" ]]; then _inlinks=1; echo "$BOX_EDGE"; echo "Links (copy):"; continue; fi
+    if [[ $_inlinks -eq 0 ]]; then [[ -n "$_l" ]] && box_line "$_l"; else echo "$_l"; fi
+  done <<< "$_out"
   # Account ko asal Xray config me bhi daalo (sirf record se kaam nahi chalta)
   python3 "$SCRIPT_DIR/scripts/sync-xray.py" --restart 2>/dev/null || echo "(xray sync baad me hoga — VPS par /opt se chalao)"
   pause
 }
 
 list_users(){
-  echo "--- SSH Accounts ---"
-  python3 - "$DATA/ssh_users.json" <<'PY' 2>/dev/null || echo "koi SSH user nahi"
+  echo "$BOX_EDGE"; box_center "SSH ACCOUNTS"; echo "$BOX_EDGE"
+  _out=$(python3 - "$DATA/ssh_users.json" <<'PY' 2>/dev/null
 import json,sys
-for u in json.load(open(sys.argv[1])):
-    print(f"{u['username']} | Expiry: {u.get('expires','?')} ({u.get('expiry_days',30)} days) | Data: {'Unlimited' if int(u.get('gb_limit') or 0)==0 else u.get('gb_limit')} | IP Limit: {'Unlimited' if int(u.get('ip_limit') or 0)==0 else u.get('ip_limit')}")
+try: users=json.load(open(sys.argv[1]))
+except Exception: users=[]
+for i,u in enumerate(users):
+    if i: print("")
+    print(u['username'])
+    print(f"  Expiry : {u.get('expires','?')} ({u.get('expiry_days',30)} days)")
+    print(f"  Data   : {'Unlimited' if int(u.get('gb_limit') or 0)==0 else u.get('gb_limit')}")
+    print(f"  IP Lim : {'Unlimited' if int(u.get('ip_limit') or 0)==0 else u.get('ip_limit')}")
 PY
-  echo "--- Xray Accounts ---"
-  python3 - "$DATA/xray_users.json" <<'PY' 2>/dev/null || echo "koi Xray user nahi"
+)
+  [[ -z "$_out" ]] && _out="koi SSH user nahi"
+  while IFS= read -r _l; do box_line "$_l"; done <<< "$_out"
+  echo "$BOX_EDGE"; box_center "XRAY ACCOUNTS"; echo "$BOX_EDGE"
+  _out=$(python3 - "$DATA/xray_users.json" <<'PY' 2>/dev/null
 import json,sys
-for u in json.load(open(sys.argv[1])):
-    print(f"{u['protocol']} {u.get('remark')} | Expiry: {u.get('expires','?')} | Data: {'Unlimited' if int(u.get('gb_limit') or 0)==0 else u.get('gb_limit')} | IP Limit: {'Unlimited' if int(u.get('ip_limit') or 0)==0 else u.get('ip_limit')}")
+try: users=json.load(open(sys.argv[1]))
+except Exception: users=[]
+for i,u in enumerate(users):
+    if i: print("")
+    print(f"{u['protocol']} {u.get('remark')}")
+    print(f"  Expiry : {u.get('expires','?')} ({u.get('expiry_days',30)} days)")
+    print(f"  Data   : {'Unlimited' if int(u.get('gb_limit') or 0)==0 else u.get('gb_limit')}")
+    print(f"  IP Lim : {'Unlimited' if int(u.get('ip_limit') or 0)==0 else u.get('ip_limit')}")
 PY
+)
+  [[ -z "$_out" ]] && _out="koi Xray user nahi"
+  while IFS= read -r _l; do box_line "$_l"; done <<< "$_out"
+  echo "$BOX_EDGE"
   pause
 }
 
 while true; do
   clear 2>/dev/null || true
-  banner "VPS Manager Suite v1.0 — Menu"
-  echo " Domain: ${DOMAIN:-(set nahi — option 02 se lagao)}   Data: $DATA"
-  echo " 01) Install All Components        07) Ping Stability (QoS / CAKE)"
-  echo " 02) Add / Change Domain           08) VPS Stats / Speedtest"
-  echo " 03) SSL Certificate (issue/renew) 09) Telegram Bot"
-  echo " 04) Manage Users / Limits / Banner 10) Web Panel (link/login/port)"
-  echo " 05) Status & Ports                11) Uninstall"
-  echo " 06) Fix SSH-WS / SSL Stack        12) Exit"
-  echo " Note: Days = literal (default 30) | GB limit (0 = unlimited) | IP limit (0 = unlimited)"
+  echo "$BOX_EDGE"
+  box_center "VPS Manager Suite v1.0"
+  box_center "Main Menu"
+  echo "$BOX_EDGE"
+  if [[ -n "$DOMAIN" ]]; then box_line "Domain: $DOMAIN"; else box_line "Domain: (not set - use 02)"; fi
+  echo "$BOX_EDGE"
+  box_line "01) Install All Components"
+  box_line "02) Add / Change Domain"
+  box_line "03) SSL Certificate (issue/renew)"
+  box_line "04) Manage Users / Limits / Banner"
+  box_line "05) Status & Ports"
+  box_line "06) Fix SSH-WS / SSL Stack"
+  box_line "07) Ping Stability (QoS / CAKE)"
+  box_line "08) VPS Stats / Speedtest"
+  box_line "09) Telegram Bot"
+  box_line "10) Web Panel (link/login/port)"
+  box_line "11) Uninstall"
+  box_line "12) Exit"
+  echo "$BOX_EDGE"
+  box_line "Note: Days = literal (default 30)"
+  box_line "GB/IP limit (0 = unlimited)"
+  echo "$BOX_EDGE"
   read -rp "Option chuno [01-12]: " opt
   case "$opt" in
     01|1) bash "$SCRIPT_DIR/install.sh" "$DOMAIN"; pause ;;
-    02|2) read -rp "Naya domain: " nd; [[ -n "$nd" ]] && { DOMAIN="$nd"; save_config_key domain "$nd" 2>/dev/null || true; python3 -c "import json,os; p='$DATA/config.json'; d=json.load(open(p)) if os.path.exists(p) else {}; d['domain']='$nd'; json.dump(d,open(p,'w'),indent=2)"; dns_check "$nd" || true; }; pause ;;
-    03|3) if declare -F issue_ssl >/dev/null 2>&1; then issue_ssl "$DOMAIN" && echo "SSL ho gaya — panel/xray restart ho gaye hain." || echo "SSL fail — upar wala error dekho (DNS A record is VPS par hai?)"; else echo "issue_ssl function nahi mila — suite update karo (vpsupdate)"; fi; pause ;;
-    04|4) echo "a) Add SSH  b) Add Xray  c) List Users  d) Banner change"; read -rp "Chuno: " s; case "$s" in a) add_ssh_user;; b) add_xray_user;; c) list_users;; d) read -rp "Naya SSH banner: " b; echo "$b" > "${CONFIG_DIR:-/etc/vps-manager}/banner.txt" 2>/dev/null || echo "$b" > "$DATA/banner.txt"; echo "Banner saved";; *) pause;; esac ;;
-    05|5) for s in nginx haproxy xray dropbear ws-proxy vps-panel; do echo "$s: $(service_status $s)"; done; print_ports; pause ;;
+    02|2) read -rp "Naya domain: " nd; [[ -n "$nd" ]] && { DOMAIN="$nd"; save_config_key domain "$nd" 2>/dev/null || true; python3 -c "import json,os; p='$DATA/config.json'; d=json.load(open(p)) if os.path.exists(p) else {}; d['domain']='$nd'; json.dump(d,open(p,'w'),indent=2)"; echo "$BOX_EDGE"; box_line "Domain set: $nd"; echo "$BOX_EDGE"; dns_check "$nd" || true; }; pause ;;
+    03|3) echo "$BOX_EDGE"; box_center "SSL CERTIFICATE"; echo "$BOX_EDGE"
+      if declare -F issue_ssl >/dev/null 2>&1; then
+        if issue_ssl "$DOMAIN"; then box_line "SSL ho gaya"; box_line "Panel/Xray restart ho gaye"; else box_line "SSL fail - error upar dekho"; box_line "DNS A record is VPS par hai?"; fi
+      else box_line "issue_ssl nahi mila"; box_line "Pehle vpsupdate chalao"; fi
+      echo "$BOX_EDGE"; pause ;;
+    04|4) echo "$BOX_EDGE"; box_center "MANAGE USERS"; echo "$BOX_EDGE"; box_line "a) Add SSH Account"; box_line "b) Add Xray Account"; box_line "c) List Users"; box_line "d) Banner Change"; echo "$BOX_EDGE"; read -rp "Chuno: " s; case "$s" in a) add_ssh_user;; b) add_xray_user;; c) list_users;; d) read -rp "Naya SSH banner: " b; echo "$b" > "${CONFIG_DIR:-/etc/vps-manager}/banner.txt" 2>/dev/null || echo "$b" > "$DATA/banner.txt"; echo "Banner saved";; *) pause;; esac ;;
+    05|5) echo "$BOX_EDGE"; box_center "STATUS & PORTS"; echo "$BOX_EDGE"; for s in nginx haproxy xray dropbear ws-proxy vps-panel; do printf -v _sl '%-10s: %s' "$s" "$(service_status "$s")"; box_line "$_sl"; done; echo "$BOX_EDGE"; print_ports; pause ;;
     06|6) bash "$SCRIPT_DIR/scripts/fix-stack.sh"; pause ;;
     07|7) read -rp "Interface [eth0]: " iface; iface="${iface:-eth0}"; read -rp "Rate [950mbit]: " rate; rate="${rate:-950mbit}"; bash "$SCRIPT_DIR/scripts/qos.sh" "$iface" "$rate" || echo "QoS ke liye root chahiye"; pause ;;
     08|8) bash "$SCRIPT_DIR/scripts/speedtest.sh"; pause ;;
-    09|9) echo "Telegram Bot: Panel > Telegram Bot me token + admin ID save karo, phir: python3 scripts/telegram-bot.py"; pause ;;
+    09|9) echo "$BOX_EDGE"; box_center "TELEGRAM BOT"; echo "$BOX_EDGE"; box_line "Panel > Telegram Bot me token"; box_line "+ admin ID save karo, phir:"; box_line "python3 scripts/telegram-bot.py"; echo "$BOX_EDGE"; pause ;;
     10) _ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}'); _cred=""
       for _f in "/etc/vps-manager/credentials.json" "$DATA/credentials.json"; do [[ -f "$_f" ]] && { _cred="$_f"; break; }; done
-      echo " --- WEB PANEL ---"
-      echo " Panel : https://$DOMAIN:9090  |  http://$_ip:9090"
+      _user="admin"; _pass="(nahi mila)"
       if [[ -n "$_cred" ]]; then
-        python3 - "$_cred" <<'PY'
+        mapfile -t _cu < <(python3 - "$_cred" <<'PY'
 import json,sys
 try:
     d=json.load(open(sys.argv[1]))
-    print(f" User  : {d.get('username','admin')}")
-    print(f" Pass  : {d.get('password','(nahi mila)')}")
+    print(d.get('username','admin'))
+    print(d.get('password','(nahi mila)'))
 except Exception:
-    print(" User  : admin"); print(" Pass  : (credentials file parh nahi paya)")
+    print("admin"); print("(credentials file parh nahi paya)")
 PY
+)
+        _user="${_cu[0]:-admin}"; _pass="${_cu[1]:-(nahi mila)}"
       else
-        echo " User  : admin"; echo " Pass  : (credentials file nahi mili — pehle option 01 Install chalao)"
+        _pass="(pehle option 01 Install chalao)"
       fi
-      echo " Port  : 9090"; pause ;;
+      echo "$BOX_EDGE"
+      box_center "WEB PANEL"
+      echo "$BOX_EDGE"
+      box_line "Panel (HTTPS):"
+      box_line "https://$DOMAIN:9090"
+      box_line "Panel (IP):"
+      box_line "http://$_ip:9090"
+      echo "$BOX_EDGE"
+      box_line "User : $_user"
+      box_line "Pass : $_pass"
+      box_line "Port : 9090"
+      echo "$BOX_EDGE"; pause ;;
     11) bash "$SCRIPT_DIR/uninstall.sh"; pause ;;
     12) echo "Allah Hafiz! Menu band."; exit 0 ;;
     *) echo "Galat option"; pause ;;

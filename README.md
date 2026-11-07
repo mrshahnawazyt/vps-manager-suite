@@ -4,10 +4,22 @@
 
 Terminal menu se bhi sab control hota hai, aur web panel se bhi — bilkul ek proper deploy suite ki tarah.
 
-![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04-orange)
+![Ubuntu](https://img.shields.io/badge/Ubuntu-20.04%20--%2025.x-orange)
 ![Shell](https://img.shields.io/badge/Shell-Bash-green)
 ![Panel](https://img.shields.io/badge/Panel-Python%20(stdlib%20only)-blue)
 ![Status](https://img.shields.io/badge/Status-v1.0-brightgreen)
+
+---
+
+## ⚡ Install — Sirf Ek Command
+
+VPS par root se bas ye ek command chalao — baaki sab khud ho jayega:
+
+```bash
+export GH_REPO=mrshahnawazyt/vps-manager-suite; curl -fsSL https://raw.githubusercontent.com/mrshahnawazyt/vps-manager-suite/main/install.sh -o install.sh && sudo -E bash install.sh
+```
+
+Domain script khud pooch lega. Install ke baad menu ke liye `vpsmenu`, update ke liye `vpsupdate`.
 
 ---
 
@@ -28,31 +40,16 @@ Terminal menu se bhi sab control hota hai, aur web panel se bhi — bilkul ek pr
 
 | Cheez | Detail |
 |---|---|
-| OS | Ubuntu 22.04 LTS (fresh VPS best hai) |
+| OS | Ubuntu 20.04 / 22.04 / 24.04 / 25.x (fresh VPS best hai) |
 | Access | root (sudo) |
 | RAM | 1 GB+ recommended |
 | Domain | Ek domain/subdomain jiska **A record VPS ki IP** par ho (SSL ke liye) |
 
-## ⚡ Quick Install — Ek Command
+## 📦 Install ki tafseel
 
-VPS par root se ye chalao:
-
-```bash
-export GH_REPO=mrshahnawazyt/vps-manager-suite
-curl -fsSL https://raw.githubusercontent.com/mrshahnawazyt/vps-manager-suite/main/install.sh -o install.sh
-sudo -E bash install.sh your.domain.com
-```
-
-> `your.domain.com` ki jagah apna domain likho. Domain na do to script khud pooch lega.
-> Sirf `install.sh` download hota hai — baaki saari files woh khud is repo se download karke install kar deta hai.
-
-**Ya phir poora folder download karke:**
-
-```bash
-git clone https://github.com/mrshahnawazyt/vps-manager-suite.git
-cd vps-manager-suite
-sudo bash install.sh your.domain.com
-```
+- Sirf `install.sh` download hota hai — baaki saari files woh khud is repo se download karke install kar deta hai.
+- Domain argument bhi de sakte ho: `sudo -E bash install.sh your.domain.com` — na do to script khud pooch lega.
+- Poora folder chahiye to: `git clone https://github.com/mrshahnawazyt/vps-manager-suite.git` karke folder se `sudo bash install.sh` chalao.
 
 Install ke end par **READY screen** milegi:
 - Web Panel ka link: `https://your.domain.com:9090`
@@ -120,12 +117,23 @@ Ye rule SSH aur Xray — har jagah same hai:
 vps-manager-suite/
 ├── install.sh          # Installer + GitHub bootstrap (ek command wala)
 ├── menu.sh             # Terminal panel (01-12)
+├── update.sh           # Ek command update: vpsupdate
 ├── uninstall.sh
 ├── lib/common.sh       # Shared functions + limit logic
 ├── web/panel.py        # Web panel (Python stdlib only — pip ki zaroorat nahi)
 ├── templates/          # nginx, haproxy, xray configs
-└── scripts/            # fix-stack, qos, speedtest, limit-check, telegram-bot, ws-proxy
+└── scripts/            # fix-stack, qos, speedtest, limit-check, sync-xray, telegram-bot, ws-proxy
 ```
+
+## 🔄 Update
+
+Install ke baad kabhi bhi latest version lagane ke liye sirf ek command:
+
+```bash
+sudo vpsupdate
+```
+
+Ye GitHub se latest suite la kar panel/menu update aur panel restart kar deta hai — accounts aur data mehfooz rehte hain.
 
 ## 🔒 Security Notes
 
