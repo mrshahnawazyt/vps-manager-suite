@@ -37,16 +37,24 @@ fi
 # --- 1) Stop + disable services ---
 step "Stopping services..."
 if command -v systemctl >/dev/null 2>&1; then
-  for svc in vps-panel ws-proxy xray haproxy nginx dropbear; do
+  for svc in vps-panel ws-proxy xray haproxy nginx dropbear vps-monitor vps-bot; do
     systemctl disable --now "$svc" >/dev/null 2>&1 || true
     systemctl stop "$svc" >/dev/null 2>&1 || true
   done
+fi
+# QoS rules (HTB classes + iptables marks) belong to the suite too
+if [[ -z "$ROOT" && -f "$(dirname "$0")/scripts/qos.sh" ]]; then
+  bash "$(dirname "$0")/scripts/qos.sh" off >/dev/null 2>&1 || true
 fi
 ok "Services stopped."
 
 # --- 2) Remove the systemd units ---
 rm -f "$ROOT/etc/systemd/system/vps-panel.service" \
-      "$ROOT/etc/systemd/system/ws-proxy.service" 2>/dev/null || true
+      "$ROOT/etc/systemd/system/ws-proxy.service" \
+      "$ROOT/etc/systemd/system/vps-monitor.service" \
+      "$ROOT/etc/systemd/system/vps-bot.service" 2>/dev/null || true
+rm -rf "$ROOT/etc/systemd/system/xray.service.d" 2>/dev/null || true
+rm -f "$ROOT/etc/letsencrypt/renewal-hooks/deploy/vps-manager.sh" 2>/dev/null || true
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload >/dev/null 2>&1 || true
 fi
@@ -165,7 +173,8 @@ fi
 # --- 8) Remove the config / data / suite folders ---
 rm -rf "$ROOT/etc/vps-manager" \
        "$ROOT/var/lib/vps-manager" \
-       "$ROOT/opt/vps-manager-suite" 2>/dev/null || true
+       "$ROOT/opt/vps-manager-suite" \
+       "$ROOT/var/backups/vps-manager-suite" 2>/dev/null || true
 ok "Data and suite folders removed."
 
 # --- 9) Dropbear: if it carries our banner, restore the defaults ---

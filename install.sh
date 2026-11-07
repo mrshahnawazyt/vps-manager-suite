@@ -115,6 +115,7 @@ ExecStart=/usr/bin/python3 /usr/local/bin/vps-ws-proxy.py
 Restart=always
 Environment=WS_PROXY_PORT=8080
 Environment=SSH_PORT_INTERNAL=109
+Environment=VPSMGR_DATA_DIR=/var/lib/vps-manager
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -131,6 +132,7 @@ haproxy -c -f /etc/haproxy/haproxy.cfg || warn "haproxy config test warning"
 # verifies the certificate, and builds combined.pem.
 info "Requesting an SSL certificate (Let's Encrypt)..."
 issue_ssl "$DOMAIN" || warn "The SSL step failed - the panel will run on HTTP. Issue SSL again from menu option 03 for the Xray TLS inbounds."
+install_renewal_hook || true
 
 # 8) Xray (official script) + config
 info "Installing Xray (official script)..."
@@ -203,9 +205,39 @@ Environment=VPSMGR_DATA_DIR=$DATA_DIR
 WantedBy=multi-user.target
 EOF
 
-# 11) Limit monitor cron (checks are skipped when GB/IP = 0; Days are checked as a literal expiry)
-cat > /etc/cron.d/vps-manager-limits <<EOF
-*/10 * * * * root bash $SCRIPT_DIR/scripts/limit-check.sh >> /var/log/vps-manager-limits.log 2>&1
+# 11) Limit monitor service - a fast loop (every few seconds) that enforces
+# expiry/GB/IP limits, tracks connected IPs and auto-deletes dead accounts.
+# (Replaces the old */10 cron - the legacy cron file is removed if present.)
+rm -f /etc/cron.d/vps-manager-limits
+cat > /etc/systemd/system/vps-monitor.service <<EOF
+[Unit]
+Description=VPS Manager Suite - Limit Monitor
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=$SCRIPT_DIR
+Environment=VPSMGR_DATA_DIR=$DATA_DIR
+ExecStart=/usr/bin/python3 $SCRIPT_DIR/scripts/monitor.py
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+# Telegram bot service (started from menu option 09 once a token is set -
+# it is intentionally NOT auto-enabled here: without a token it would just
+# exit, and the menu manages its full lifecycle)
+cat > /etc/systemd/system/vps-bot.service <<EOF
+[Unit]
+Description=VPS Manager Suite - Telegram Bot
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=/usr/bin/python3 $SCRIPT_DIR/scripts/telegram-bot.py
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
 EOF
 # vpsmenu / menu / vpsupdate are small wrappers that run from the /opt suite folder
 # (copying a single file on its own lost lib/common.sh - hence the wrappers)
@@ -218,7 +250,7 @@ chmod +x /usr/local/bin/vpsupdate
 
 # 12) Services enable + health check
 systemctl daemon-reload || true
-for svc in nginx haproxy dropbear ws-proxy vps-panel xray; do systemctl enable --now "$svc" 2>/dev/null && ok "$svc up" || warn "$svc failed to start - check: systemctl status $svc"; done
+for svc in nginx haproxy dropbear ws-proxy vps-panel xray vps-monitor; do systemctl enable --now "$svc" 2>/dev/null && ok "$svc up" || warn "$svc failed to start - check: systemctl status $svc"; done
 # 'enable --now' does NOT restart an already-running service - so restart the
 # panel explicitly, so the new panel.py and the SSL certificate issued in this
 # install are loaded immediately (otherwise the panel stays on old code / HTTP).

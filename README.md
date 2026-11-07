@@ -1,13 +1,13 @@
 # 🚀 VPS Manager Suite
 
-**Deploy and manage a complete VPS from a single script** — SSH-WS/SSL, Xray (VMess / VLESS / Trojan), HAProxy + Nginx multiplexer, CAKE QoS, and a dark **Web Panel (port 9090)**.
+**Deploy and manage a complete VPS from a single script** — SSH-WS/SSL, Xray (VMess / VLESS / Trojan), HAProxy + Nginx multiplexer, CAKE QoS, a fast limit monitor, and a dark **Web Panel (port 9090)**.
 
-Everything is controlled from the terminal menu and from the web panel — a proper deploy suite.
+Everything is controlled from three places with the same power: the **terminal menu**, the **web panel**, and a **Telegram bot** that works as a full remote panel.
 
 ![Ubuntu](https://img.shields.io/badge/Ubuntu-20.04%20--%2025.x-orange)
 ![Shell](https://img.shields.io/badge/Shell-Bash-green)
 ![Panel](https://img.shields.io/badge/Panel-Python%20(stdlib%20only)-blue)
-![Status](https://img.shields.io/badge/Status-v1.0-brightgreen)
+![Status](https://img.shields.io/badge/Status-Feature--Parity%20Build-brightgreen)
 
 ---
 
@@ -26,15 +26,23 @@ The script asks for your domain itself. After the install, use `vpsmenu` for the
 ## ✨ Features
 
 - **1-Command Install** — one command from GitHub downloads and installs everything
-- **Terminal Menu** — 12 options (Install, Domain, SSL, Users, Fix, QoS, Stats, Telegram, Uninstall...)
-- **Web Panel (9090)** — Dashboard, SSH Accounts, Xray Accounts, Running Services, VPS Stats & Speedtest, Telegram Bot, Settings, Panel Admins + Activity Log
+- **Terminal Menu** — 12 options (Install, Domain, SSL, Users, Status, Fix, QoS, Stats, Telegram, Panel, Uninstall)
+- **Web Panel (9090)** — Dashboard, SSH Accounts, Xray Accounts, Services, VPS Stats & Speedtest, Telegram Bot, Settings, Panel Admins, Activity/Audit Log
+- **Full Account Lifecycle** — Create, Renew, Edit Limits, Reset Usage, Lock, Unlock and Delete for SSH and Xray accounts — from the terminal, the panel **and** the Telegram bot
 - **SSH** — Dropbear based, Direct / SSL / WS / WS-SSL, with an auto-generated payload
-- **Xray** — VMess / VLESS / Trojan over WS / TCP / XHTTP, 5 links per account + QR
-- **SSL** — Let's Encrypt, auto issue + renew (self-signed fallback if DNS fails)
-- **Limits System** — Days / GB / IP limit on every account, enforced by the limit monitor
-- **Ping Stability** — CAKE QoS (anti-bufferbloat) in one click
-- **Telegram Bot** — set up with a BotFather token, with bot admin management
-- **Maintenance** — Fix SSH-WS/SSL stack, Xray repair, Install All — one click from the panel
+- **Xray** — VMess / VLESS / Trojan, **5 links per account for every protocol**: WS, WS-TLS, TCP-TLS, XHTTP-TLS, XHTTP-NTLS — plus a QR code for each link in the panel
+- **Fast Limit Monitor** — expiry, GB quota and IP limits enforced every **4 seconds** (SSH and Xray), with distinct Active / EXPIRED / GB-LIMIT / IP-LIMIT / LOCKED states and auto-delete of long-dead accounts (grace period, countdown shown)
+- **Connected Users View** — live connected IPs for SSH and Xray, with the real client IP (PROXY-protocol + header recovery) and country, plus session kick
+- **SSL Tools** — Let's Encrypt issue, **force renew**, **auto-renew dry-run test**, days-left display, **re-apply certificate to all services**, and an auto-renew deploy hook (self-signed fallback if DNS fails)
+- **Domain Change = Full Re-provisioning** — new domain re-renders the stack, re-issues SSL, and regenerates every stored Xray link automatically
+- **Multi-Admin Panel** — Viewer / Admin / Super Admin roles, per-action permissions, and an **audit log** that records the admin and the source IP of every action
+- **Service Control** — per-service Start / Stop / Restart, service log viewer, and Restart All from the panel; Install All / Fix Stack / Xray Repair stream live progress to the browser
+- **Traffic Stats** — vnstat daily/monthly traffic on the Stats page (one-click install)
+- **Ping Stability** — CAKE QoS (anti-bufferbloat) plus **per-user bandwidth caps** for individual SSH accounts
+- **Telegram Bot** — a full remote panel: inline menus and wizards for accounts, limits, connected users, domain, banner, QoS and system actions; Super Admin plus extra bot admins
+- **Verified Updater** — `vpsupdate` verifies the new files (syntax + sanity checks) before applying anything, and keeps timestamped backups of the previous version
+- **Panel Management** — change the panel port (with validation), change login, reset password, view panel logs, reinstall the panel keeping the same login — all from the terminal
+- **Full-Clean Uninstall** — one confirmation removes the whole suite and restores the default configs
 
 ## 📋 Requirements
 
@@ -66,28 +74,41 @@ vpsmenu
 
 | # | Option | What it does |
 |---|---|---|
-| 01 | Install All Components | Full deploy (14 steps) |
-| 02 | Add / Change Domain | Set the domain + DNS check |
-| 03 | SSL Certificate | Issue / renew Let's Encrypt |
-| 04 | Manage Users / Limits / Banner | SSH/Xray users, limits, SSH banner |
-| 05 | Status & Ports | Service and port status |
-| 06 | Fix SSH-WS / SSL Stack | Reconfigure the stack |
-| 07 | Ping Stability (QoS) | CAKE QoS on/off |
+| 01 | Install All Components | Full deploy |
+| 02 | Add / Change Domain | Set the domain + DNS check, then full re-provisioning (SSL re-issue, all Xray links regenerated) |
+| 03 | SSL Certificate | Submenu: Issue / Force Renew / Dry-Run Test / Re-apply to Services / Status with days left |
+| 04 | Manage Users / Limits / Banner | Full lifecycle for SSH + Xray accounts (per-protocol Xray menus, Show Links, Connected IPs), SSH banner |
+| 05 | Status & Ports | Live status screen: server IP, location, SSL days left, account counts, services, ports |
+| 06 | Fix SSH-WS / SSL Stack | Component repair pipeline with verify + self-heal |
+| 07 | Ping Stability (QoS) | CAKE QoS on/off, status, per-user bandwidth caps |
 | 08 | VPS Stats / Speedtest | Server info + speedtest |
-| 09 | Telegram Bot | Bot setup |
-| 10 | Web Panel | Panel link / login / port |
-| 11 | Uninstall | Remove everything |
+| 09 | Telegram Bot | Bot service management: token/admin setup, start/stop/restart, logs, bot admins, remove |
+| 10 | Web Panel | Panel link/login, change port or login, reset password, logs, reinstall, remove panel only |
+| 11 | Uninstall | Remove everything (full clean) |
 | 12 | Exit | — |
 
 ## 🌐 Web Panel
 
 - **URL:** `https://<domain>:9090` — Login: `admin` + the install password
-- **Dashboard** — CPU/RAM/Disk, SSH/Xray account counts, **9/9 services status**, server info
-- **SSH Accounts** — create an account and get a ready-made output card: username, password, host, SNI, expiry, ports, **payload** (with a Copy button)
-- **Xray Accounts** — VMess/VLESS/Trojan, auto-generated UUID, **TLS / NTLS / TCP / XHTTP TLS / XHTTP NTLS** links per account + QR code
-- **VPS Stats** — full server info + live graph + **Run Speedtest**
-- **Telegram Bot** — status, bot setup, bot admins (no restart needed)
-- **Settings** — change domain + issue SSL, SSH banner (HTML, max 2000 bytes), Ping QoS, maintenance buttons, panel password change
+- **Dashboard** — CPU/RAM/Disk, SSH/Xray account counts, services status, server info
+- **SSH Accounts** — create an account and get a ready-made output card: username, password, host, SNI, expiry, ports, server City/Region, **payload** (with a Copy button); every account row also has Renew / Set Limits / Reset Usage / Lock-Unlock / Delete
+- **Xray Accounts** — VMess/VLESS/Trojan, auto-generated UUID, **5 links per account** (WS / WS-TLS / TCP-TLS / XHTTP-TLS / XHTTP-NTLS), each with a Copy button and a **QR code**; same lifecycle actions as SSH
+- **Connected Users** — live connected IPs with country, for SSH and Xray accounts
+- **Services** — per-service Start / Stop / Restart, log viewer, Restart All, plus streaming Install All / Fix Stack / Xray Repair actions
+- **VPS Stats** — full server info + **vnstat traffic** (daily/monthly) + **Run Speedtest**
+- **Telegram Bot** — bot status and setup; the bot itself is a full remote panel (see below)
+- **Panel Admins** — multiple logins with **Viewer** (read-only), **Admin** and **Super Admin** roles; the main admin can never be removed
+- **Activity / Audit Log** — every action with the admin name and the source IP
+- **Settings** — change domain (full re-provisioning, streamed live), SSL tools, SSH banner (HTML, max 2000 bytes), Ping QoS with per-user caps, panel password change
+
+## 🤖 Telegram Bot
+
+The bot is a complete remote panel, not just a status checker:
+
+- Inline menus + step-by-step wizards: SSH and Xray create/list/detail, links, renew, edit limits, reset usage, lock/unlock, delete, connected users
+- Status & Ports, Domain change (full re-provisioning), Banner, QoS (status / apply / remove / per-user cap)
+- System actions: Fix Stack, per-service restart, Restart All, SSL, Install All (long actions report their output back to the chat)
+- Roles: one **Super Admin** plus extra **bot admins**; only the Super Admin manages bot admins and runs Install All; unknown chats are ignored
 
 ## 📏 Account Limits Rule ⚠️
 
@@ -101,14 +122,20 @@ The same rule applies everywhere — SSH and Xray:
 
 **Example:** Days `30`, GB `0`, IP `0` → Expiry is **30 days after creation**, Data: **Unlimited**, IP Limit: **Unlimited**.
 
+Enforcement runs every **4 seconds** (`vps-monitor` service): expired accounts are locked, quota-hit accounts are disabled, extra IPs are cut — and accounts left dead past the grace period (default 24 h) are deleted automatically, with the countdown shown in the account lists.
+
 ## 🔌 Ports
 
 | Port | Service |
 |---|---|
 | 22 · 109 · 143 | SSH Direct (Dropbear: 109 · 143) |
-| 80 | SSH-WS → configured path (default `/sshws`) |
-| 443 | SSH-WS-SSL (TLS) + SSH-SSL (SNI/Host = domain) |
-| 8443 | Xray TCP |
+| 80 | SSH-WS + Xray WS / XHTTP (non-TLS) via Nginx |
+| 443 | SSH-WS-SSL (TLS) + SSH-SSL (SNI/Host = domain) + Xray WS-TLS / XHTTP-TLS via Nginx |
+| 8080 | WebSocket proxy (direct WS listener) |
+| 8081 | WebSocket proxy PROXY-protocol listener (real-IP chain, internal) |
+| 8443 · 8446 · 8447 | Xray TCP-TLS — VLESS · Trojan · VMess |
+| 8444 · 8445 · 8448 | Xray XHTTP-TLS — VLESS · Trojan · VMess |
+| 10443 | Xray VLESS TLS fallback |
 | 9090 | Web Panel (HTTPS) |
 
 ## 📂 Project Structure
@@ -117,12 +144,14 @@ The same rule applies everywhere — SSH and Xray:
 vps-manager-suite/
 ├── install.sh          # Installer + GitHub bootstrap (the one-command install)
 ├── menu.sh             # Terminal menu (01-12)
-├── update.sh           # One-command update: vpsupdate
-├── uninstall.sh
-├── lib/common.sh       # Shared functions + limit logic
+├── update.sh           # Verified updater with backups: vpsupdate
+├── uninstall.sh        # Full-clean uninstaller
+├── lib/common.sh       # Shared functions, limit logic, SSL tools
 ├── web/panel.py        # Web panel (Python stdlib only - no pip needed)
 ├── templates/          # nginx, haproxy, xray configs
-└── scripts/            # fix-stack, qos, speedtest, limit-check, sync-xray, telegram-bot, ws-proxy
+└── scripts/            # monitor, sync-xray, fix-xray-sync, vpsm (account core),
+                        # telegram-bot, ws-proxy, qr, ssl, set-domain,
+                        # panel-admin, qos, fix-stack, speedtest, limit-check
 ```
 
 ## 🔄 Update
@@ -133,14 +162,15 @@ To install the latest version at any time, run one command:
 sudo vpsupdate
 ```
 
-It fetches the latest suite from GitHub, updates the panel/menu and restarts the panel — your accounts and data stay safe.
+The updater downloads the new files, **verifies them first** (shell + Python syntax checks and size sanity — a broken update is rejected and nothing changes), backs up the current version to `/var/backups/vps-manager-suite/` (the last 3 backups are kept), then applies the update and restarts the services. Your accounts and data stay safe.
 
 ## 🔒 Security Notes
 
 - Change the panel password **immediately** after installing (Settings → My Account)
 - Never write your GitHub token, Telegram token or panel password into code or commits
-- After changing the domain, issue SSL again (Settings → Issue SSL Certificate)
+- Changing the domain re-issues SSL and regenerates all account links automatically — no manual step is needed afterwards
 - SSH users are created **tunnel-only** — they get no shell access to the VPS
+- Give extra panel logins the **Viewer** role when they only need to look; every admin action is recorded in the audit log with its source IP
 
 ## 🗑️ Uninstall
 
@@ -148,7 +178,7 @@ It fetches the latest suite from GitHub, updates the panel/menu and restarts the
 sudo bash uninstall.sh
 ```
 
-Or use terminal menu option **11**.
+Or use terminal menu option **11**. One confirmation, then everything is removed — suite folder, services, monitor, bot, data — and the default nginx/haproxy configs are restored.
 
 ## 🤝 Contributing
 
