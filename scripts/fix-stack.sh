@@ -82,6 +82,13 @@ ensure_haproxy_pem(){
 info "Starting the stack fix... (Nginx, HAProxy, Xray, Dropbear, ws-proxy)"
 ensure_xray_certs || true
 ensure_haproxy_pem || true
+# SSH logins: Dropbear rejects accounts whose shell is not in /etc/shells.
+# Guarantee the tunnel shell is listed and repair any stored account whose
+# system user still carries the old nologin shell.
+if declare -F ensure_tunnel_shell >/dev/null 2>&1; then
+  ensure_tunnel_shell || warn "Could not add the tunnel shell to /etc/shells - SSH password logins will be rejected."
+  repair_tunnel_shells || true
+fi
 mkdir -p /var/log/xray 2>/dev/null || true
 # The stock Xray unit runs as User=nobody, which cannot read the TLS
 # private key (mode 600) or write the access log - install the drop-in
