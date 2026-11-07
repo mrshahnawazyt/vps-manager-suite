@@ -17,7 +17,8 @@
 #   ws-proxy-ctl.sh status         Show service state + port state
 #   ws-proxy-ctl.sh set-port <n>   Move the proxy to port <n> (the PROXY-
 #                                  protocol listener moves to <n>+1):
-#                                  config + unit + nginx router are updated
+#                                  config + unit + nginx router + the
+#                                  HAProxy CONNECT backend are updated
 #                                  together; a port already bound by a
 #                                  DIFFERENT process aborts the change
 #                                  before anything is touched
@@ -33,6 +34,7 @@ CONFIG_DIR="${VPSMGR_CONFIG_DIR:-/etc/vps-manager}"
 CFG="$DATA_DIR/config.json"
 UNIT_FILE="${WS_PROXY_UNIT_FILE:-/etc/systemd/system/ws-proxy.service}"
 NGINX_CONF="${VPSMGR_NGINX_CONF:-/etc/nginx/nginx.conf}"
+HAPROXY_CONF="${VPSMGR_HAPROXY_CONF:-/etc/haproxy/haproxy.cfg}"
 PANEL_UNIT="${VPSMGR_PANEL_UNIT:-/etc/systemd/system/vps-panel.service}"
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 SUITE_DIR="$(dirname "$HERE")"
@@ -341,8 +343,40 @@ do_set_port(){
   else
     warn "nginx binary not found - config test skipped"
   fi
+  # 3b) render + validate the new HAProxy config the same way - on 443
+  # HAProxy terminates TLS and sends CONNECT requests straight to this
+  # proxy, so its ws_proxy_direct backend must move with the port too.
+  tmp2="$(mktemp)"
+  if [[ -f "$SUITE_DIR/templates/haproxy.cfg.tpl" && -n "$dom" ]]; then
+    sed "s/__DOMAIN__/$dom/g; s/__WSPROXY_PORT__/$new/g" \
+      "$SUITE_DIR/templates/haproxy.cfg.tpl" > "$tmp2"
+    info "HAProxy config rendered from the template (CONNECT backend now points to port $new)"
+  elif [[ -f "$HAPROXY_CONF" ]]; then
+    sed -E "s|(server wsproxy 127\.0\.0\.1:)[0-9]+|\1$new|" "$HAPROXY_CONF" > "$tmp2"
+    warn "Template or domain missing - updated only the wsproxy line of the live HAProxy config"
+  else
+    err "No HAProxy template and no live HAProxy config found - change aborted, nothing was modified"
+    rm -f "$tmp" "$tmp2"
+    return 1
+  fi
+  if command -v haproxy >/dev/null 2>&1; then
+    # haproxy -c also loads the TLS bundle referenced by the config -
+    # when it is not built yet (pre-SSL state), only warn: the port move
+    # itself is still valid, HAProxy picks the bundle up once SSL exists.
+    if haproxy -c -f "$tmp2" >/dev/null 2>&1; then
+      ok "HAProxy config test passed"
+    elif grep -q "haproxy.pem" "$tmp2" && [[ ! -s /etc/vps-manager/ssl/haproxy.pem ]]; then
+      warn "HAProxy config test skipped - the TLS bundle /etc/vps-manager/ssl/haproxy.pem does not exist yet (issue SSL first)"
+    else
+      err "HAProxy config test FAILED for the rendered config - change aborted, nothing was modified"
+      rm -f "$tmp" "$tmp2"
+      return 1
+    fi
+  else
+    warn "haproxy binary not found - config test skipped"
+  fi
   # 4) persist the choice (suite config)
-  cfg_set_port "$new" || { err "Could not save the config - change aborted"; rm -f "$tmp"; return 1; }
+  cfg_set_port "$new" || { err "Could not save the config - change aborted"; rm -f "$tmp" "$tmp2"; return 1; }
   ok "Config updated: ws_proxy_port=$new"
   # 5) update the systemd unit environment
   python3 - "$UNIT_FILE" "$new" <<'PY'
@@ -368,14 +402,17 @@ for ln in out:
 open(path, "w").write("\n".join(final) + "\n")
 print("[INFO] Unit updated: WS_PROXY_PORT=%d, WS_PROXY_PROXY_PORT=%d" % (port, port + 1))
 PY
-  [[ $? -eq 0 ]] || { err "Could not update the unit file - change aborted"; rm -f "$tmp"; return 1; }
-  # 6) install the rendered nginx router (with a backup of the previous one)
+  [[ $? -eq 0 ]] || { err "Could not update the unit file - change aborted"; rm -f "$tmp" "$tmp2"; return 1; }
+  # 6) install the rendered nginx router + HAProxy config (backups kept)
   if [[ -f "$NGINX_CONF" ]]; then cp -a "$NGINX_CONF" "$NGINX_CONF.bak-pyproxy" 2>/dev/null || true; fi
   mkdir -p "$(dirname "$NGINX_CONF")" 2>/dev/null || true
   cat "$tmp" > "$NGINX_CONF" && info "Nginx router installed (backup: $NGINX_CONF.bak-pyproxy)" || warn "Could not write $NGINX_CONF"
   rm -f "$tmp"
-  info "HAProxy needs no change - it routes to nginx on 127.0.0.1:18080, not to the proxy directly"
-  # 7) apply: reload systemd, restart the proxy, reload nginx
+  if [[ -f "$HAPROXY_CONF" ]]; then cp -a "$HAPROXY_CONF" "$HAPROXY_CONF.bak-pyproxy" 2>/dev/null || true; fi
+  mkdir -p "$(dirname "$HAPROXY_CONF")" 2>/dev/null || true
+  cat "$tmp2" > "$HAPROXY_CONF" && info "HAProxy config installed (backup: $HAPROXY_CONF.bak-pyproxy)" || warn "Could not write $HAPROXY_CONF"
+  rm -f "$tmp2"
+  # 7) apply: reload systemd, restart the proxy, reload nginx, restart HAProxy
   systemctl daemon-reload 2>/dev/null || warn "systemctl daemon-reload reported a problem"
   info "Restarting the Python Proxy on the new port..."
   systemctl restart "$UNIT" 2>/dev/null || warn "systemctl restart reported a problem"
@@ -385,6 +422,11 @@ PY
     info "Nginx restarted"
   else
     warn "Nginx reload/restart reported a problem - check: systemctl status nginx"
+  fi
+  if systemctl restart haproxy 2>/dev/null; then
+    info "HAProxy restarted (CONNECT backend now on port $new)"
+  else
+    warn "HAProxy restart reported a problem - check: systemctl status haproxy"
   fi
   # 8) verify
   if wait_active && verify_on "$new"; then

@@ -51,8 +51,37 @@ ensure_xray_certs(){
   return 1
 }
 
+# --- HAProxy TLS bundle -------------------------------------------------------
+# HAProxy terminates TLS on 443 and loads its certificate as ONE bundle
+# file (cert + key): $CONFIG_DIR/ssl/haproxy.pem. If the bundle is missing
+# or older than the cert pair (e.g. an install from before the bundle
+# existed, or a cert replaced by hand), HAProxy refuses to start or keeps
+# serving the old certificate - rebuild it from the pair. Mirrors
+# build_haproxy_pem() in lib/common.sh, kept standalone so this script
+# still works when common.sh cannot be sourced.
+SSL_DIR_FIX="${CONFIG_DIR:-/etc/vps-manager}/ssl"
+ensure_haproxy_pem(){
+  local bundle="$SSL_DIR_FIX/haproxy.pem"
+  if [[ -s "$SSL_DIR_FIX/fullchain.pem" && -s "$SSL_DIR_FIX/privkey.pem" ]]; then
+    if [[ ! -s "$bundle" || "$SSL_DIR_FIX/fullchain.pem" -nt "$bundle" || "$SSL_DIR_FIX/privkey.pem" -nt "$bundle" ]]; then
+      if cat "$SSL_DIR_FIX/fullchain.pem" "$SSL_DIR_FIX/privkey.pem" > "$bundle" 2>/dev/null; then
+        chmod 600 "$bundle" 2>/dev/null || true
+        ok "HAProxy TLS bundle rebuilt ($bundle)"
+        return 0
+      fi
+      warn "Could not write the HAProxy TLS bundle: $bundle"
+      return 1
+    fi
+    ok "HAProxy TLS bundle is present and current"
+    return 0
+  fi
+  warn "No SSL certificate pair in $SSL_DIR_FIX - HAProxy cannot terminate TLS on 443 until SSL is issued (menu option 03)."
+  return 1
+}
+
 info "Starting the stack fix... (Nginx, HAProxy, Xray, Dropbear, ws-proxy)"
 ensure_xray_certs || true
+ensure_haproxy_pem || true
 mkdir -p /var/log/xray 2>/dev/null || true
 # The stock Xray unit runs as User=nobody, which cannot read the TLS
 # private key (mode 600) or write the access log - install the drop-in
@@ -106,7 +135,7 @@ if [[ -n "$DOM_NOW" ]]; then
     fi
   fi
   if [[ -f "$SCRIPT_DIR/templates/haproxy.cfg.tpl" && -d /etc/haproxy ]]; then
-    _want=$(sed "s/__DOMAIN__/$DOM_NOW/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl")
+    _want=$(sed "s/__DOMAIN__/$DOM_NOW/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl")
     if [[ "$_want" != "$(cat /etc/haproxy/haproxy.cfg 2>/dev/null)" ]]; then
       echo "$_want" > /etc/haproxy/haproxy.cfg 2>/dev/null && ok "haproxy config re-rendered from the template" || warn "Could not rewrite the haproxy config"
     fi

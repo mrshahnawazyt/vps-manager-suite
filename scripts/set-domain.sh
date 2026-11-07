@@ -53,7 +53,7 @@ if [[ -f "$SUITE_DIR/templates/nginx.conf.tpl" ]]; then
   fi
 fi
 if [[ -f "$SUITE_DIR/templates/haproxy.cfg.tpl" && -d /etc/haproxy ]]; then
-  sed "s/__DOMAIN__/$NEW/g" "$SUITE_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg
+  sed "s/__DOMAIN__/$NEW/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SUITE_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg
   systemctl restart haproxy 2>/dev/null || true
   echo "[domain] haproxy config re-rendered + restarted"
 fi

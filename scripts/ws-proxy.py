@@ -4,10 +4,23 @@
 Relays SSH-over-WebSocket traffic to the local SSH backend (Dropbear):
 
     client --WS--> nginx /sshws --> THIS PROXY --> 127.0.0.1:109
+    client --TLS 443--> HAProxy --CONNECT--> THIS PROXY --> Dropbear
 
-It completes the WebSocket handshake itself (RFC 6455 Sec-WebSocket-
-Accept), replies 101, and then becomes a raw TCP tunnel - the payload
-clients used with these SSH accounts speak raw SSH after the upgrade.
+Three ways in, one raw tunnel out - the handler speaks HTTP until the
+connection turns into a tunnel:
+  1. WebSocket upgrade: it completes the handshake itself (RFC 6455
+     Sec-WebSocket-Accept), replies 101, and then becomes a raw TCP
+     tunnel - the payload clients used with these SSH accounts speak
+     raw SSH after the upgrade.
+  2. CONNECT (SSH-over-SSL on port 443): HAProxy terminates TLS and
+     routes CONNECT requests here directly. The proxy answers
+     "HTTP/1.1 200 OK", then reads the NEXT request on the same
+     connection - HTTP Custom sends its payload right after CONNECT -
+     and handles it by these same rules.
+  3. Payload mode: a plain HTTP request with no WebSocket upgrade is
+     answered "HTTP/1.1 200 OK" and the connection becomes a raw tunnel,
+     so the SSH banner from Dropbear reaches the client.
+Anything that is not HTTP at all is forwarded untouched, as before.
 
 Real client IPs: WS users would otherwise all appear as 127.0.0.1,
 which makes IP limits impossible. The proxy recovers the real IP from
@@ -85,9 +98,13 @@ def header_ip(req):
 def pipe(a, b):
     try:
         while True:
-            r, _, _ = select.select([a], [], [], 30)
+            # No idle timeout: an SSH tunnel may sit silent for a long
+            # time and must not be cut by the proxy. (This used to break
+            # the loop after 30 idle seconds, which killed every quiet
+            # session no matter what timeouts HAProxy/nginx allowed.)
+            r, _, _ = select.select([a], [], [])
             if not r:
-                break
+                continue
             data = a.recv(8192)
             if not data:
                 break
@@ -141,6 +158,41 @@ def read_proxy_header(client, peer_ip):
     return peer_ip, first
 
 
+class BufferedConn:
+    """Socket wrapper with a byte buffer: one HTTP request head can be
+    read exactly (up to CRLFCRLF) while bytes that arrived in the same
+    packet - an SSH banner sent right behind a payload request, say -
+    stay buffered for the tunnel phase instead of being swallowed."""
+
+    def __init__(self, sock, initial=b""):
+        self.sock = sock
+        self.buf = initial
+
+    def read_head(self):
+        """Return one HTTP request head including the trailing CRLFCRLF.
+        A bare SSH banner line (raw client, no HTTP) is returned as-is.
+        Bytes after the head stay buffered."""
+        while b"\r\n\r\n" not in self.buf:
+            if self.buf.startswith(b"SSH-") and b"\r\n" in self.buf:
+                line, self.buf = self.buf.split(b"\r\n", 1)
+                return line + b"\r\n"
+            if len(self.buf) > 262144:
+                raise ConnectionError("request head too large")
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("eof while reading the request head")
+            self.buf += chunk
+        head, self.buf = self.buf.split(b"\r\n\r\n", 1)
+        return head + b"\r\n\r\n"
+
+    def take_buffered(self):
+        data, self.buf = self.buf, b""
+        return data
+
+
+KNOWN_METHODS = (b"GET", b"POST", b"PUT", b"HEAD", b"DELETE", b"OPTIONS", b"PATCH")
+
+
 def serve(client, addr, use_proxy):
     try:
         peer_ip = addr[0]
@@ -149,28 +201,48 @@ def serve(client, addr, use_proxy):
             real_ip, leftover = read_proxy_header(client, peer_ip)
             if real_ip != peer_ip:
                 via = "proxy"
-        req = leftover + client.recv(65536)
-        if not req:
-            client.close()
-            return
-        if b"upgrade: websocket" in req.lower():
-            hip = header_ip(req)
+        conn = BufferedConn(client, leftover)
+        mode, first_bytes = "", b""
+        # Speak HTTP until the connection becomes a raw tunnel. An
+        # SSH-over-SSL client passes through two request phases on ONE
+        # connection: CONNECT first (answered 200), then its payload.
+        while not mode:
+            head = conn.read_head()
+            if not head:
+                client.close()
+                return
+            hip = header_ip(head)
             if hip:
                 real_ip, via = hip, "x-real-ip"
-            acc = ws_accept(req)
-            client.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
-                            "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n" % acc).encode())
-            rest = req.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in req else b""
-        else:
-            rest = req
+            method = head.split(b" ", 1)[0].strip().upper()
+            if b"upgrade: websocket" in head.lower():
+                acc = ws_accept(head)
+                client.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                                "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n" % acc).encode())
+                mode, first_bytes = "websocket", conn.take_buffered()
+            elif method == b"CONNECT":
+                client.sendall(b"HTTP/1.1 200 OK\r\n\r\n")
+                # Not a tunnel yet - loop and handle the next request
+                # (the payload) on this same connection by the same rules.
+            elif method in KNOWN_METHODS:
+                # Payload mode: plain HTTP, no upgrade. Confirm the
+                # request, then pipe raw bytes both ways so the SSH
+                # banner from the backend reaches the client.
+                client.sendall(b"HTTP/1.1 200 OK\r\n\r\n")
+                mode, first_bytes = "payload", conn.take_buffered()
+            else:
+                # Not HTTP at all - forward everything untouched.
+                mode, first_bytes = "raw", head + conn.take_buffered()
         log_connection(real_ip, via)
+        print("[OK] ws-proxy: %s tunnel from %s (via %s) -> SSH %s:%d"
+              % (mode, real_ip, via, TARGET[0], TARGET[1]), flush=True)
         target = socket.create_connection(TARGET, timeout=10)
-        if rest:
-            target.sendall(rest)
+        if first_bytes:
+            target.sendall(first_bytes)
         threading.Thread(target=pipe, args=(client, target), daemon=True).start()
         pipe(target, client)
     except Exception as e:
-        print("ws-proxy client error:", e)
+        print("[ERR] ws-proxy client error:", e, flush=True)
         try:
             client.close()
         except Exception:
