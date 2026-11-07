@@ -85,12 +85,12 @@ for f in ("ssh_users.json","xray_users.json","activity.json"):
 PY
 cp "$CREDS_FILE" "$DATA_DIR/credentials.json" 2>/dev/null || true
 
-# 4) Dropbear (SSH tunnel) - ports 109 / 143, banner
+# 4) Dropbear (SSH tunnel) - ports 109 / 143 / 447, banner
 info "Configuring Dropbear..."
 cat > /etc/default/dropbear <<EOF
 NO_START=0
 DROPBEAR_PORT=109
-DROPBEAR_EXTRA_ARGS="-p 143"
+DROPBEAR_EXTRA_ARGS="-p 143 -p 447"
 DROPBEAR_BANNER="/etc/vps-manager/banner.txt"
 DROPBEAR_RECEIVE_WINDOW=65536
 EOF
@@ -285,9 +285,9 @@ cat <<EOF
   Password     : $PANEL_PASS
   Creds file   : $CREDS_FILE
                  (and $DATA_DIR/credentials.json)
-  SSH Dropbear : 109, 143
+  SSH Dropbear : 109, 143, 447
   SSH WS       : 80 (HTTP) | 443 (WS+SSL/TLS)
-  ws-proxy     : $WS_PORT (internal -> 109)
+  Python Proxy : $WS_PORT (ws-proxy -> 109)
   Nginx        : 127.0.0.1:18080 (internal)
   Xray         : VMess /vmess, VLESS /vless
                  Trojan /trojan, XHTTP /xhttp

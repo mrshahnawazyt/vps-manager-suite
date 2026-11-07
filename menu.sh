@@ -49,9 +49,11 @@ add_ssh_user(){
     id "$u" >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin -e "$(date -d "+${days} days" +%F)" "$u" 2>/dev/null || warn "useradd skipped/failed"
     echo "$u:$pw" | chpasswd 2>/dev/null || true
   fi
-  _out=$(python3 - "$DATA" "$u" "$pw" "$days" "$gb" "$ip" <<'PY'
+  PROXY_PORT=$(python3 -c "import json;print(json.load(open('$DATA/config.json')).get('ws_proxy_port',8080))" 2>/dev/null || echo 8080)
+  [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] || PROXY_PORT=8080
+  _out=$(python3 - "$DATA" "$u" "$pw" "$days" "$gb" "$ip" "$PROXY_PORT" <<'PY'
 import json,os,sys,datetime
-data,u,pw,days,gb,ip=sys.argv[1:7]
+data,u,pw,days,gb,ip,proxy=sys.argv[1:8]
 days=int(days); gb=int(gb); ip=int(ip)
 created=datetime.date.today()
 rec={"username":u,"password":pw,"expiry_days":days,"gb_limit":gb,"ip_limit":ip,"used_gb":0,"created":created.isoformat(),"expires":(created+datetime.timedelta(days=days)).isoformat()}
@@ -62,11 +64,14 @@ print(f"Pass   : {pw}")
 print(f"Expiry : {rec['expires']}")
 print(f"Data   : {'Unlimited' if gb==0 else str(gb)+' GB'}")
 print(f"IP Lim : {'Unlimited' if ip==0 else ip}")
+print(f"Proxy  : {proxy} (Python Proxy)")
 PY
 )
   echo "$BOX_EDGE"; box_center "SSH ACCOUNT READY"; echo "$BOX_EDGE"
   while IFS= read -r _l; do [[ -n "$_l" ]] && box_line "$_l"; done <<< "$_out"
   echo "$BOX_EDGE"
+  echo "VPN Details (copy):"
+  echo "$DOMAIN:443@$u:$pw"
   echo "Payload (copy):"
   echo "GET /sshws HTTP/1.1[crlf]Host: $DOMAIN[crlf]Upgrade: websocket[crlf][crlf]"
   log_activity "menu ssh create $u days=$days gb=$gb ip=$ip"; pause
