@@ -74,6 +74,48 @@ dns_check() {
   return 0
 }
 
+# --- SSL: Let's Encrypt (standalone, port 80) ya self-signed fallback -------
+# HTTP-01 ke liye port 80 khaali chahiye, is liye certbot se pehle nginx/haproxy
+# rokte hain aur baad me dobara start karte hain. (Purana --http-01-port 8899 wala
+# tareeqa kaam nahi karta tha — ACME hamesha port 80 par aata hai.)
+issue_ssl() {
+  local domain="$1" le_dir="/etc/letsencrypt/live/$1"
+  ensure_dirs; mkdir -p "$CONFIG_DIR/ssl"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop haproxy nginx 2>/dev/null || true
+  fi
+  local got=""
+  if command -v certbot >/dev/null 2>&1; then
+    if certbot certonly --standalone -d "$domain" --non-interactive --agree-tos -m "admin@$domain" >/dev/null 2>&1 \
+       && [[ -s "$le_dir/fullchain.pem" && -s "$le_dir/privkey.pem" ]]; then
+      cp "$le_dir/fullchain.pem" "$CONFIG_DIR/ssl/fullchain.pem" || true
+      cp "$le_dir/privkey.pem" "$CONFIG_DIR/ssl/privkey.pem" || true
+      got="letsencrypt"
+    fi
+  fi
+  if [[ -z "$got" ]]; then
+    warn "Let's Encrypt nahi mila (DNS/port 80 check karo) — self-signed fallback bana raha hoon."
+    if command -v openssl >/dev/null 2>&1; then
+      openssl req -x509 -newkey rsa:2048 -keyout "$CONFIG_DIR/ssl/privkey.pem" \
+        -out "$CONFIG_DIR/ssl/fullchain.pem" -days 365 -nodes -subj "/CN=$domain" >/dev/null 2>&1 || true
+    fi
+    got="self-signed"
+  fi
+  # Verify: dono files maujood + non-empty honi chahiye, warna Xray/Panel start nahi honge
+  if [[ -s "$CONFIG_DIR/ssl/fullchain.pem" && -s "$CONFIG_DIR/ssl/privkey.pem" ]]; then
+    chmod 600 "$CONFIG_DIR/ssl/privkey.pem" 2>/dev/null || true
+    cat "$CONFIG_DIR/ssl/fullchain.pem" "$CONFIG_DIR/ssl/privkey.pem" > "$CONFIG_DIR/ssl/combined.pem" 2>/dev/null || true
+    ok "SSL ready ($got): $CONFIG_DIR/ssl/fullchain.pem"
+  else
+    err "SSL FAIL: cert files nahi bani! $CONFIG_DIR/ssl/ khaali hai — Xray aur Panel (HTTPS) start nahi honge."
+    got=""
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    for s in haproxy nginx xray vps-panel; do systemctl try-restart "$s" 2>/dev/null || true; done
+  fi
+  [[ -n "$got" ]]
+}
+
 service_status() {
   local svc="$1"
   if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$svc" 2>/dev/null; then echo "active"; else
