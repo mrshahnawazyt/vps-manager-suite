@@ -4,22 +4,22 @@
 #   Days = literal count, default 30. Expiry = creation date + Days. (0 = 0 days, NOT unlimited)
 #   GB limit (0 = unlimited) | IP limit (0 = unlimited)
 set -u
-# Symlink (/usr/local/bin/vpsmenu) se chale to asal file ka folder lo
+# If launched via a symlink (/usr/local/bin/vpsmenu), resolve the real file's folder
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-# common.sh dhoondo: script ke paas, warna /opt wale suite folder me
+# Find common.sh: next to this script, otherwise in the /opt suite folder
 for _lib in "$SCRIPT_DIR/lib/common.sh" "/opt/vps-manager-suite/lib/common.sh"; do
   [[ -f "$_lib" ]] && { source "$_lib"; break; }
 done
-# Agar phir bhi common.sh na mile (akeli copy chal rahi ho) to basic functions
-# yahi bana lo taaki menu "command not found" diye baghair chale
+# If common.sh is still not found (running as a single copied file), define the
+# basic functions here so the menu runs without "command not found" errors
 if ! declare -F banner >/dev/null 2>&1; then
   banner(){ echo "=== $* ==="; }
   info(){ echo "[INFO] $*"; }; warn(){ echo "[!] $*"; }; err(){ echo "[X] $*" >&2; }; ok(){ echo "[OK] $*"; }
   gen_password(){ tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 14; echo; }
   get_domain(){ python3 -c "import json;print(json.load(open('${VPSMGR_DATA_DIR:-/var/lib/vps-manager}/config.json')).get('domain',''))" 2>/dev/null || echo ""; }
-  save_config_key(){ :; }; dns_check(){ echo "DNS check skip (common.sh nahi mila)"; return 0; }
+  save_config_key(){ :; }; dns_check(){ echo "DNS check skipped (common.sh not found)"; return 0; }
   service_status(){ systemctl is-active "$1" 2>/dev/null || echo "unknown"; }
-  print_ports(){ ss -tulnp 2>/dev/null || netstat -tulnp 2>/dev/null || echo "ports nahi dikhe"; }
+  print_ports(){ ss -tulnp 2>/dev/null || netstat -tulnp 2>/dev/null || echo "could not list ports"; }
   log_activity(){ :; }
 fi
 DATA="${VPSMGR_DATA_DIR:-/var/lib/vps-manager}"
@@ -27,9 +27,9 @@ DATA="${VPSMGR_DATA_DIR:-/var/lib/vps-manager}"
 mkdir -p "$DATA" 2>/dev/null || true
 DOMAIN="$(get_domain)"; [[ -z "$DOMAIN" ]] && DOMAIN=$(python3 -c "import json;print(json.load(open('$DATA/config.json')).get('domain',''))" 2>/dev/null || echo "")
 
-pause(){ read -rp "Enter dabao wapas menu ke liye..." _; }
+pause(){ read -rp "Press Enter to return to the menu..." _; }
 
-# --- Display helpers: single column, har line max 46 chars (phone terminal) ---
+# --- Display helpers: single column, every line max 46 chars (phone terminal) ---
 BOX_EDGE="+--------------------------------------------+"
 box_line(){ printf '| %-42s |\n' "$1"; }
 box_center(){
@@ -44,9 +44,9 @@ add_ssh_user(){
   read -rp "Days [30]: " days; days="${days:-30}"
   read -rp "GB limit (0 = unlimited) [0]: " gb; gb="${gb:-0}"
   read -rp "IP limit (0 = unlimited) [0]: " ip; ip="${ip:-0}"
-  # Real VPS par tunnel-only system user:
+  # On a real VPS, create a tunnel-only system user:
   if [[ "${EUID:-$(id -u)}" -eq 0 ]] && command -v useradd >/dev/null; then
-    id "$u" >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin -e "$(date -d "+${days} days" +%F)" "$u" 2>/dev/null || warn "useradd skip/fail"
+    id "$u" >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin -e "$(date -d "+${days} days" +%F)" "$u" 2>/dev/null || warn "useradd skipped/failed"
     echo "$u:$pw" | chpasswd 2>/dev/null || true
   fi
   _out=$(python3 - "$DATA" "$u" "$pw" "$days" "$gb" "$ip" <<'PY'
@@ -75,7 +75,7 @@ PY
 add_xray_user(){
   echo "$BOX_EDGE"; box_center "Create Xray Account"; echo "$BOX_EDGE"
   read -rp "Protocol (VMess/VLESS/Trojan) [VLESS]: " proto; proto="${proto:-VLESS}"
-  read -rp "Remark/Naam: " remark; [[ -z "$remark" ]] && return
+  read -rp "Remark/Name: " remark; [[ -z "$remark" ]] && return
   read -rp "Days [30]: " days; days="${days:-30}"
   read -rp "GB limit (0 = unlimited) [0]: " gb; gb="${gb:-0}"
   read -rp "IP limit (0 = unlimited) [0]: " ip; ip="${ip:-0}"
@@ -119,8 +119,8 @@ PY
     if [[ "$_l" == "==LINKS==" ]]; then _inlinks=1; echo "$BOX_EDGE"; echo "Links (copy):"; continue; fi
     if [[ $_inlinks -eq 0 ]]; then [[ -n "$_l" ]] && box_line "$_l"; else echo "$_l"; fi
   done <<< "$_out"
-  # Account ko asal Xray config me bhi daalo (sirf record se kaam nahi chalta)
-  python3 "$SCRIPT_DIR/scripts/sync-xray.py" --restart 2>/dev/null || echo "(xray sync baad me hoga — VPS par /opt se chalao)"
+  # Also add the account to the live Xray config (a record alone is not enough)
+  python3 "$SCRIPT_DIR/scripts/sync-xray.py" --restart 2>/dev/null || echo "(xray sync will run later - run it from /opt on the VPS)"
   pause
 }
 
@@ -138,7 +138,7 @@ for i,u in enumerate(users):
     print(f"  IP Lim : {'Unlimited' if int(u.get('ip_limit') or 0)==0 else u.get('ip_limit')}")
 PY
 )
-  [[ -z "$_out" ]] && _out="koi SSH user nahi"
+  [[ -z "$_out" ]] && _out="No SSH users yet"
   while IFS= read -r _l; do box_line "$_l"; done <<< "$_out"
   echo "$BOX_EDGE"; box_center "XRAY ACCOUNTS"; echo "$BOX_EDGE"
   _out=$(python3 - "$DATA/xray_users.json" <<'PY' 2>/dev/null
@@ -153,7 +153,7 @@ for i,u in enumerate(users):
     print(f"  IP Lim : {'Unlimited' if int(u.get('ip_limit') or 0)==0 else u.get('ip_limit')}")
 PY
 )
-  [[ -z "$_out" ]] && _out="koi Xray user nahi"
+  [[ -z "$_out" ]] && _out="No Xray users yet"
   while IFS= read -r _l; do box_line "$_l"; done <<< "$_out"
   echo "$BOX_EDGE"
   pause
@@ -183,38 +183,38 @@ while true; do
   box_line "Note: Days = literal (default 30)"
   box_line "GB/IP limit (0 = unlimited)"
   echo "$BOX_EDGE"
-  read -rp "Option chuno [01-12]: " opt
+  read -rp "Choose an option [01-12]: " opt
   case "$opt" in
     01|1) bash "$SCRIPT_DIR/install.sh" "$DOMAIN"; pause ;;
-    02|2) read -rp "Naya domain: " nd; [[ -n "$nd" ]] && { DOMAIN="$nd"; save_config_key domain "$nd" 2>/dev/null || true; python3 -c "import json,os; p='$DATA/config.json'; d=json.load(open(p)) if os.path.exists(p) else {}; d['domain']='$nd'; json.dump(d,open(p,'w'),indent=2)"; echo "$BOX_EDGE"; box_line "Domain set: $nd"; echo "$BOX_EDGE"; dns_check "$nd" || true; }; pause ;;
+    02|2) read -rp "New domain: " nd; [[ -n "$nd" ]] && { DOMAIN="$nd"; save_config_key domain "$nd" 2>/dev/null || true; python3 -c "import json,os; p='$DATA/config.json'; d=json.load(open(p)) if os.path.exists(p) else {}; d['domain']='$nd'; json.dump(d,open(p,'w'),indent=2)"; echo "$BOX_EDGE"; box_line "Domain set: $nd"; echo "$BOX_EDGE"; dns_check "$nd" || true; }; pause ;;
     03|3) echo "$BOX_EDGE"; box_center "SSL CERTIFICATE"; echo "$BOX_EDGE"
       if declare -F issue_ssl >/dev/null 2>&1; then
-        if issue_ssl "$DOMAIN"; then box_line "SSL ho gaya"; box_line "Panel/Xray restart ho gaye"; else box_line "SSL fail - error upar dekho"; box_line "DNS A record is VPS par hai?"; fi
-      else box_line "issue_ssl nahi mila"; box_line "Pehle vpsupdate chalao"; fi
+        if issue_ssl "$DOMAIN"; then box_line "SSL issued successfully"; box_line "Panel/Xray restarted"; else box_line "SSL failed - see errors above"; box_line "Does the DNS A record point here?"; fi
+      else box_line "issue_ssl not found"; box_line "Run vpsupdate first"; fi
       echo "$BOX_EDGE"; pause ;;
-    04|4) echo "$BOX_EDGE"; box_center "MANAGE USERS"; echo "$BOX_EDGE"; box_line "a) Add SSH Account"; box_line "b) Add Xray Account"; box_line "c) List Users"; box_line "d) Banner Change"; echo "$BOX_EDGE"; read -rp "Chuno: " s; case "$s" in a) add_ssh_user;; b) add_xray_user;; c) list_users;; d) read -rp "Naya SSH banner: " b; echo "$b" > "${CONFIG_DIR:-/etc/vps-manager}/banner.txt" 2>/dev/null || echo "$b" > "$DATA/banner.txt"; echo "Banner saved";; *) pause;; esac ;;
+    04|4) echo "$BOX_EDGE"; box_center "MANAGE USERS"; echo "$BOX_EDGE"; box_line "a) Add SSH Account"; box_line "b) Add Xray Account"; box_line "c) List Users"; box_line "d) Banner Change"; echo "$BOX_EDGE"; read -rp "Choose: " s; case "$s" in a) add_ssh_user;; b) add_xray_user;; c) list_users;; d) read -rp "New SSH banner: " b; echo "$b" > "${CONFIG_DIR:-/etc/vps-manager}/banner.txt" 2>/dev/null || echo "$b" > "$DATA/banner.txt"; echo "Banner saved";; *) pause;; esac ;;
     05|5) echo "$BOX_EDGE"; box_center "STATUS & PORTS"; echo "$BOX_EDGE"; for s in nginx haproxy xray dropbear ws-proxy vps-panel; do printf -v _sl '%-10s: %s' "$s" "$(service_status "$s")"; box_line "$_sl"; done; echo "$BOX_EDGE"; print_ports; pause ;;
     06|6) bash "$SCRIPT_DIR/scripts/fix-stack.sh"; pause ;;
-    07|7) read -rp "Interface [eth0]: " iface; iface="${iface:-eth0}"; read -rp "Rate [950mbit]: " rate; rate="${rate:-950mbit}"; bash "$SCRIPT_DIR/scripts/qos.sh" "$iface" "$rate" || echo "QoS ke liye root chahiye"; pause ;;
+    07|7) read -rp "Interface [eth0]: " iface; iface="${iface:-eth0}"; read -rp "Rate [950mbit]: " rate; rate="${rate:-950mbit}"; bash "$SCRIPT_DIR/scripts/qos.sh" "$iface" "$rate" || echo "QoS requires root"; pause ;;
     08|8) bash "$SCRIPT_DIR/scripts/speedtest.sh"; pause ;;
-    09|9) echo "$BOX_EDGE"; box_center "TELEGRAM BOT"; echo "$BOX_EDGE"; box_line "Panel > Telegram Bot me token"; box_line "+ admin ID save karo, phir:"; box_line "python3 scripts/telegram-bot.py"; echo "$BOX_EDGE"; pause ;;
+    09|9) echo "$BOX_EDGE"; box_center "TELEGRAM BOT"; echo "$BOX_EDGE"; box_line "Save the token + admin ID in the"; box_line "Panel under Telegram Bot, then run:"; box_line "python3 scripts/telegram-bot.py"; echo "$BOX_EDGE"; pause ;;
     10) _ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}'); _cred=""
       for _f in "/etc/vps-manager/credentials.json" "$DATA/credentials.json"; do [[ -f "$_f" ]] && { _cred="$_f"; break; }; done
-      _user="admin"; _pass="(nahi mila)"
+      _user="admin"; _pass="(not found)"
       if [[ -n "$_cred" ]]; then
         mapfile -t _cu < <(python3 - "$_cred" <<'PY'
 import json,sys
 try:
     d=json.load(open(sys.argv[1]))
     print(d.get('username','admin'))
-    print(d.get('password','(nahi mila)'))
+    print(d.get('password','(not found)'))
 except Exception:
-    print("admin"); print("(credentials file parh nahi paya)")
+    print("admin"); print("(could not read credentials file)")
 PY
 )
-        _user="${_cu[0]:-admin}"; _pass="${_cu[1]:-(nahi mila)}"
+        _user="${_cu[0]:-admin}"; _pass="${_cu[1]:-(not found)}"
       else
-        _pass="(pehle option 01 Install chalao)"
+        _pass="(run option 01 Install first)"
       fi
       echo "$BOX_EDGE"
       box_center "WEB PANEL"
@@ -229,7 +229,7 @@ PY
       box_line "Port : 9090"
       echo "$BOX_EDGE"; pause ;;
     11) bash "$SCRIPT_DIR/uninstall.sh"; pause ;;
-    12) echo "Allah Hafiz! Menu band."; exit 0 ;;
-    *) echo "Galat option"; pause ;;
+    12) echo "Goodbye!"; exit 0 ;;
+    *) echo "Invalid option"; pause ;;
   esac
 done

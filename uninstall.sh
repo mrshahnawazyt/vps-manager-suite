@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # VPS Manager Suite v1.0 - Uninstaller (original)
-# Poora saaf uninstall: services, configs, accounts, data — sab hata do.
-# Har step "|| true" ke saath hai taaki beech mein rukawat na aaye.
+# A complete, clean uninstall: services, configs, accounts, data - remove everything.
+# Every step is guarded with "|| true" so nothing stops halfway.
 set -u
 
-# Test ke liye root prefix (asli istemal mein khaali rehta hai)
+# Root prefix for testing (stays empty in real use)
 ROOT="${TEST_ROOT:-}"
 
-# --- Box helpers (menu.sh wala style, standalone copy) ---
+# --- Box helpers (same style as menu.sh, standalone copy) ---
 BOX_EDGE="+--------------------------------------------+"
 box_line(){ printf '| %-42s |\n' "$1"; }
 box_center(){
@@ -17,47 +17,47 @@ box_center(){
 step(){ echo "[..] $*"; }
 ok(){ echo "[OK] $*"; }
 
-# --- Confirmation (ek hi dafa) ---
+# --- Confirmation (asked only once) ---
 echo "$BOX_EDGE"
 box_center "VPS MANAGER SUITE"
 box_center "UNINSTALL"
 echo "$BOX_EDGE"
-box_line "Saari services band ho jayengi."
-box_line "Panel, Xray config, saare accounts"
-box_line "aur poora data DELETE ho jayega."
-box_line "Ye wapas nahi aayega."
+box_line "All services will be stopped."
+box_line "The panel, Xray config, all accounts"
+box_line "and all data will be DELETED."
+box_line "This cannot be undone."
 echo "$BOX_EDGE"
-read -rp "Pakka uninstall karna hai? (y/N): " ans
-[[ "$ans" =~ ^[Yy]$ ]] || { echo "Cancel - kuch delete nahi hua."; exit 0; }
+read -rp "Are you sure you want to uninstall? (y/N): " ans
+[[ "$ans" =~ ^[Yy]$ ]] || { echo "Cancelled - nothing was deleted."; exit 0; }
 
 if [[ "${EUID:-$(id -u)}" -ne 0 && -z "$ROOT" ]]; then
-  echo "[!] Root se chalao, warna kuch files nahi hatengi."
+  echo "[!] Run as root, otherwise some files will not be removed."
 fi
 
-# --- 1) Services stop + disable ---
-step "Services band ho rahi hain..."
+# --- 1) Stop + disable services ---
+step "Stopping services..."
 if command -v systemctl >/dev/null 2>&1; then
   for svc in vps-panel ws-proxy xray haproxy nginx dropbear; do
     systemctl disable --now "$svc" >/dev/null 2>&1 || true
     systemctl stop "$svc" >/dev/null 2>&1 || true
   done
 fi
-ok "Services band."
+ok "Services stopped."
 
-# --- 2) Systemd units hatao ---
+# --- 2) Remove the systemd units ---
 rm -f "$ROOT/etc/systemd/system/vps-panel.service" \
       "$ROOT/etc/systemd/system/ws-proxy.service" 2>/dev/null || true
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload >/dev/null 2>&1 || true
 fi
-ok "Panel services ki files hata dein."
+ok "Service files removed."
 
-# --- 3) Cron hatao ---
+# --- 3) Remove the cron entry ---
 rm -f "$ROOT/etc/cron.d/vps-manager-limits" 2>/dev/null || true
-ok "Limit monitor cron hata diya."
+ok "Limit monitor cron removed."
 
-# --- 4) Panel ke banaye SSH users hatao ---
-step "Panel wale SSH accounts hata raha hoon..."
+# --- 4) Remove the SSH users created by the panel ---
+step "Removing panel-created SSH accounts..."
 USERS_FILE="$ROOT/var/lib/vps-manager/ssh_users.json"
 _users=""
 if [[ -f "$USERS_FILE" ]]; then
@@ -84,21 +84,21 @@ for _u in $_users; do
   esac
   userdel "$_u" >/dev/null 2>&1 || true
 done
-ok "SSH accounts hata diye."
+ok "SSH accounts removed."
 
-# --- 5) Binaries / wrappers hatao ---
+# --- 5) Remove binaries / wrappers ---
 rm -f "$ROOT/usr/local/bin/vps-panel.py" \
       "$ROOT/usr/local/bin/vps-ws-proxy.py" \
       "$ROOT/usr/local/bin/vpsmenu" \
       "$ROOT/usr/local/bin/menu" \
       "$ROOT/usr/local/bin/vpsupdate" 2>/dev/null || true
-ok "Commands (vpsmenu/vpsupdate) hata diye."
+ok "Commands (vpsmenu/vpsupdate) removed."
 
-# --- 6) Xray ka hamara config hatao (binary rehne do) ---
+# --- 6) Remove our Xray config (keep the binary) ---
 rm -f "$ROOT/usr/local/etc/xray/config.json" 2>/dev/null || true
-ok "Xray config hata diya."
+ok "Xray config removed."
 
-# --- 7) Nginx / HAProxy: hamara ho to default wapas likho ---
+# --- 7) Nginx / HAProxy: if the config is ours, restore the default ---
 NGINX_CONF="$ROOT/etc/nginx/nginx.conf"
 if [[ -f "$NGINX_CONF" ]] && grep -Eq "18080|vps-manager" "$NGINX_CONF" 2>/dev/null; then
   cat > "$NGINX_CONF" <<'EOF' 2>/dev/null || true
@@ -127,7 +127,7 @@ http {
 	include /etc/nginx/sites-enabled/*;
 }
 EOF
-  ok "Nginx default config wapas laga diya."
+  ok "Nginx default config restored."
 fi
 
 HAPROXY_CFG="$ROOT/etc/haproxy/haproxy.cfg"
@@ -159,16 +159,16 @@ defaults
 	errorfile 503 /etc/haproxy/errors/503.http
 	errorfile 504 /etc/haproxy/errors/504.http
 EOF
-  ok "HAProxy default config wapas laga diya."
+  ok "HAProxy default config restored."
 fi
 
-# --- 8) Config / data / suite folders hatao ---
+# --- 8) Remove the config / data / suite folders ---
 rm -rf "$ROOT/etc/vps-manager" \
        "$ROOT/var/lib/vps-manager" \
        "$ROOT/opt/vps-manager-suite" 2>/dev/null || true
-ok "Data aur suite folders hata diye."
+ok "Data and suite folders removed."
 
-# --- 9) Dropbear: hamara banner ho to defaults wapas ---
+# --- 9) Dropbear: if it carries our banner, restore the defaults ---
 DROPBEAR_CONF="$ROOT/etc/default/dropbear"
 if [[ -f "$DROPBEAR_CONF" ]] && grep -q "vps-manager" "$DROPBEAR_CONF" 2>/dev/null; then
   cat > "$DROPBEAR_CONF" <<'EOF' 2>/dev/null || true
@@ -178,15 +178,15 @@ DROPBEAR_EXTRA_ARGS=""
 DROPBEAR_BANNER=""
 DROPBEAR_RECEIVE_WINDOW=65536
 EOF
-  ok "Dropbear default (port 22) wapas laga diya."
+  ok "Dropbear defaults restored (port 22)."
 fi
 
 # --- Done ---
 echo "$BOX_EDGE"
 box_center "UNINSTALL COMPLETE"
 echo "$BOX_EDGE"
-box_line "Services, panel, configs hata diye."
-box_line "Accounts aur data bhi delete ho gaya."
-box_line "VPS ab saaf hai - dobara install"
-box_line "ke liye ready hai."
+box_line "Services, panel and configs removed."
+box_line "Accounts and data were deleted too."
+box_line "The VPS is clean and ready for"
+box_line "a fresh install."
 echo "$BOX_EDGE"

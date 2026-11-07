@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # VPS Manager Suite - Updater (original code)
-# GitHub repo se latest version la kar /opt/vps-manager-suite update karta hai,
-# panel/ws-proxy files aur vpsmenu/menu/vpsupdate wrappers refresh karta hai,
-# aur vps-panel (+ ws-proxy) restart karta hai.
+# Downloads the latest version from the GitHub repo and updates
+# /opt/vps-manager-suite, refreshes the panel/ws-proxy files and the
+# vpsmenu/menu/vpsupdate wrappers, and restarts vps-panel (+ ws-proxy).
 #
 # Usage: sudo bash update.sh [--dry-run]
-# Env overrides (testing ke liye):
+# Env overrides (for testing):
 #   VPSMGR_REPO=owner/repo        (default: mrshahnawazyt/vps-manager-suite)
 #   VPSMGR_BRANCH=main
-#   VPSMGR_TARBALL=/path/file.tgz (local tarball — download skip ho jata hai)
+#   VPSMGR_TARBALL=/path/file.tgz (local tarball - the download is skipped)
 #   VPSMGR_SUITE_DIR=/opt/vps-manager-suite
 set -u
 REPO="${VPSMGR_REPO:-mrshahnawazyt/vps-manager-suite}"
@@ -18,31 +18,31 @@ DRY_RUN=0; [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
 
 fail(){ echo "[UPDATE-FAIL] $*" >&2; exit 1; }
 
-[[ "${EUID:-$(id -u)}" -eq 0 ]] || fail "Root chahiye: sudo bash update.sh"
+[[ "${EUID:-$(id -u)}" -eq 0 ]] || fail "Root is required: sudo bash update.sh"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 TGZ="$TMP/suite.tgz"
 if [[ -n "${VPSMGR_TARBALL:-}" ]]; then
-  [[ -f "$VPSMGR_TARBALL" ]] || fail "VPSMGR_TARBALL wali file nahi mili: $VPSMGR_TARBALL"
+  [[ -f "$VPSMGR_TARBALL" ]] || fail "VPSMGR_TARBALL file not found: $VPSMGR_TARBALL"
   cp "$VPSMGR_TARBALL" "$TGZ"
-  echo "[update] Local tarball use ho raha hai: $VPSMGR_TARBALL"
+  echo "[update] Using local tarball: $VPSMGR_TARBALL"
 else
-  echo "[update] Latest version download ho raha hai: $REPO@$BRANCH"
+  echo "[update] Downloading the latest version: $REPO@$BRANCH"
   curl -fsSL "https://api.github.com/repos/$REPO/tarball/$BRANCH" -o "$TGZ" \
-    || fail "Download fail — internet/GitHub check karo."
+    || fail "Download failed - check the internet/GitHub connection."
 fi
 
 mkdir -p "$TMP/src"
-tar -xzf "$TGZ" --strip-components=1 -C "$TMP/src" || fail "Tarball extract fail ho gaya."
+tar -xzf "$TGZ" --strip-components=1 -C "$TMP/src" || fail "Failed to extract the tarball."
 
-# Safety: aadha/kharab download suite ko replace NA kare — pehle verify karo
+# Safety: a partial/corrupt download must NOT replace the suite - verify first
 for f in install.sh menu.sh update.sh web/panel.py lib/common.sh; do
-  [[ -f "$TMP/src/$f" ]] || fail "Tarball me zaroori file nahi mili: $f — update rok diya, purana suite safe hai."
+  [[ -f "$TMP/src/$f" ]] || fail "Required file missing from the tarball: $f - update stopped, the existing suite is safe."
 done
-echo "[update] Tarball verify OK"
+echo "[update] Tarball verified OK"
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  echo "UPDATE DRY-RUN OK: sab files maujood hain, asal update ke liye baghair --dry-run chalao."
+  echo "UPDATE DRY-RUN OK: all files are present; run without --dry-run to apply the update."
   exit 0
 fi
 
@@ -50,11 +50,11 @@ mkdir -p "$SUITE_DIR"
 cp -a "$TMP/src/." "$SUITE_DIR/"
 chmod +x "$SUITE_DIR"/*.sh "$SUITE_DIR"/scripts/*.sh 2>/dev/null || true
 
-# Panel / ws-proxy ki installed copies refresh karo
+# Refresh the installed copies of the panel / ws-proxy
 install -m 755 "$SUITE_DIR/web/panel.py" /usr/local/bin/vps-panel.py
 install -m 755 "$SUITE_DIR/scripts/ws-proxy.py" /usr/local/bin/vps-ws-proxy.py
 
-# Command wrappers refresh karo
+# Refresh the command wrappers
 for _cmd in vpsmenu menu; do
   printf '#!/usr/bin/env bash\nexec bash %s/menu.sh "$@"\n' "$SUITE_DIR" > "/usr/local/bin/$_cmd"
   chmod +x "/usr/local/bin/$_cmd"
@@ -62,10 +62,10 @@ done
 printf '#!/usr/bin/env bash\nexec bash %s/update.sh "$@"\n' "$SUITE_DIR" > /usr/local/bin/vpsupdate
 chmod +x /usr/local/bin/vpsupdate
 
-# Services restart (jo maujood hon)
+# Restart the services (where present)
 if command -v systemctl >/dev/null 2>&1; then
   systemctl restart vps-panel 2>/dev/null || true
   systemctl restart ws-proxy 2>/dev/null || true
 fi
 
-echo "UPDATE OK — VPS Manager Suite ka latest version lag gaya hai. Panel: systemctl status vps-panel"
+echo "UPDATE OK - the latest version of VPS Manager Suite is installed. Panel: systemctl status vps-panel"
