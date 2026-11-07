@@ -32,10 +32,14 @@ check_os() {
     return 0
   fi
   local major="${VERSION_ID%%.*}"
-  if [[ "$major" =~ ^[0-9]+$ ]] && (( major < 20 )); then
-    warn "Ubuntu $VERSION_ID is very old"
-    warn "Versions older than 20.04 may be"
-    warn "missing some packages."
+  if [[ "$major" =~ ^[0-9]+$ ]] && (( major < 18 )); then
+    warn "Ubuntu $VERSION_ID is not supported"
+    warn "This suite needs Ubuntu 18.04 or newer."
+  elif [[ "$major" =~ ^[0-9]+$ ]] && (( major == 18 )); then
+    info "OS: Ubuntu ${VERSION_ID} (supported)"
+    info "Note: CAKE QoS on 18.04 needs the HWE"
+    info "kernel - the stock 4.15 kernel has"
+    info "no sch_cake, so fq_codel is used there."
   else
     info "OS: Ubuntu ${VERSION_ID} (supported)"
   fi
