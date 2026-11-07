@@ -99,17 +99,22 @@ EOF
 echo "Welcome to VPS Manager Suite" > "$CONFIG_DIR/banner.txt" 2>/dev/null || true
 # Tunnel-only: new SSH users are created from the menu/panel with shell /usr/sbin/nologin
 
-# 5) ws-proxy (Python service)
-info "Setting up the ws-proxy service (port 8080 -> SSH 109)..."
+# 5) ws-proxy (Python Proxy service)
+# Port from the suite config (ws_proxy_port, default 8080) so a port chosen
+# in the panel survives a reinstall; the PROXY-protocol listener is WS_PORT+1.
+WS_PORT=$(python3 -c "import json;print(json.load(open('$DATA_DIR/config.json')).get('ws_proxy_port',8080))" 2>/dev/null || echo 8080)
+[[ "$WS_PORT" =~ ^[0-9]+$ ]] || WS_PORT=8080
+info "Setting up the ws-proxy service (port $WS_PORT -> SSH 109)..."
 install -m 755 "$SCRIPT_DIR/scripts/ws-proxy.py" /usr/local/bin/vps-ws-proxy.py
-cat > /etc/systemd/system/ws-proxy.service <<'EOF'
+cat > /etc/systemd/system/ws-proxy.service <<EOF
 [Unit]
 Description=VPS Manager WS Proxy
 After=network.target dropbear.service
 [Service]
 ExecStart=/usr/bin/python3 /usr/local/bin/vps-ws-proxy.py
 Restart=always
-Environment=WS_PROXY_PORT=8080
+Environment=WS_PROXY_PORT=$WS_PORT
+Environment=WS_PROXY_PROXY_PORT=$((WS_PORT+1))
 Environment=SSH_PORT_INTERNAL=109
 Environment=VPSMGR_DATA_DIR=/var/lib/vps-manager
 [Install]
@@ -118,7 +123,7 @@ EOF
 
 # 6) Nginx internal router + HAProxy mux
 info "Applying the Nginx + HAProxy templates..."
-sed "s/__DOMAIN__/$DOMAIN/g; s/__PANEL_PORT__/9090/g" "$SCRIPT_DIR/templates/nginx.conf.tpl" > /etc/nginx/nginx.conf
+sed "s/__DOMAIN__/$DOMAIN/g; s/__PANEL_PORT__/9090/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/nginx.conf.tpl" > /etc/nginx/nginx.conf
 sed "s/__DOMAIN__/$DOMAIN/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg
 nginx -t || warn "nginx config test warning"
 haproxy -c -f /etc/haproxy/haproxy.cfg || warn "haproxy config test warning"
@@ -282,7 +287,7 @@ cat <<EOF
                  (and $DATA_DIR/credentials.json)
   SSH Dropbear : 109, 143
   SSH WS       : 80 (HTTP) | 443 (WS+SSL/TLS)
-  ws-proxy     : 8080 (internal -> 109)
+  ws-proxy     : $WS_PORT (internal -> 109)
   Nginx        : 127.0.0.1:18080 (internal)
   Xray         : VMess /vmess, VLESS /vless
                  Trojan /trojan, XHTTP /xhttp
