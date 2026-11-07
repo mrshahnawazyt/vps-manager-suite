@@ -13,8 +13,13 @@ only existed as panel records and Xray never knew them.
 - Every client gets "email" = remark (sanitized) so Xray stats and the
   access log attribute traffic to that account (used by limit-check)
 - Expired, disabled (by limit-check) and IP-blocked accounts are skipped
+- TLS cert/key pairs referenced by the config: if a pair is completely
+  missing, a self-signed pair is created (a real certificate is never
+  overwritten) - otherwise Xray exits at once on the missing files
 - After writing, the config is tested with `xray run -test` (if the binary
-  exists) and the service is restarted on --restart
+  exists) and the service is restarted on --restart. If the test FAILS, the
+  template-only seed config is written instead (accounts re-sync next run),
+  so a known-bad config is never left in place
 
 Usage: python3 sync-xray.py [--restart]
 Env: VPSMGR_DATA_DIR, VPSMGR_XRAY_CONFIG, VPSMGR_XRAY_TEMPLATE
@@ -71,6 +76,47 @@ def ip_block_active(acct):
     except Exception:
         return False
 
+def ensure_certs(cfg):
+    """Make sure every TLS cert/key pair referenced by the config exists.
+
+    A completely missing pair is created self-signed (the panel domain is
+    used as CN when known). A real certificate is NEVER overwritten; a
+    half-missing pair is only reported, because replacing one half would
+    break the pair - re-issue SSL from menu option 03 in that case.
+    """
+    pairs = set()
+    for ib in cfg.get("inbounds", []):
+        tls = (ib.get("streamSettings") or {}).get("tlsSettings") or {}
+        for c in tls.get("certificates", []) or []:
+            cf, kf = c.get("certificateFile"), c.get("keyFile")
+            if cf and kf:
+                pairs.add((cf, kf))
+    for cf, kf in sorted(pairs):
+        have_c = os.path.exists(cf) and os.path.getsize(cf) > 0
+        have_k = os.path.exists(kf) and os.path.getsize(kf) > 0
+        if have_c and have_k:
+            continue
+        if have_c != have_k:
+            print(f"sync-xray: WARNING certificate pair is incomplete ({cf} / {kf}) - Xray cannot start; re-issue SSL from menu option 03")
+            continue
+        dom = "localhost"
+        conf = load_json(os.path.join(DATA_DIR, "config.json"), {})
+        if conf.get("domain"):
+            dom = str(conf["domain"])
+        try:
+            os.makedirs(os.path.dirname(cf) or ".", exist_ok=True)
+            r = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048",
+                                "-keyout", kf, "-out", cf, "-days", "365", "-nodes",
+                                "-subj", f"/CN={dom}"], capture_output=True, text=True)
+            if r.returncode == 0 and os.path.exists(cf) and os.path.exists(kf):
+                try: os.chmod(kf, 0o600)
+                except Exception: pass
+                print(f"sync-xray: TLS certificate was missing - created a self-signed pair at {cf}")
+            else:
+                print("sync-xray: WARNING could not create a self-signed certificate (openssl missing?) - Xray TLS inbounds will not start")
+        except Exception as e:
+            print(f"sync-xray: WARNING certificate creation failed: {e}")
+
 def main():
     tpl_path = next((p for p in TPL_CANDIDATES if p and os.path.exists(p)), "")
     if not tpl_path:
@@ -78,6 +124,8 @@ def main():
     with open(tpl_path) as f: raw = f.read()
     seed = bootstrap_uuid()
     cfg = json.loads(raw.replace("__UUID__", seed))
+    seed_cfg = json.loads(json.dumps(cfg))  # template-only config, kept as the fallback
+    ensure_certs(cfg)
     accounts = load_json(os.path.join(DATA_DIR, "xray_users.json"), [])
     by_tag = {ib.get("tag"): ib for ib in cfg.get("inbounds", [])}
     added = 0
@@ -121,15 +169,28 @@ def main():
     print(f"sync-xray: config written -> {OUT} (seed + {added} account-clients, total accounts: {len(accounts)}, skipped: {skipped})")
     # Config test (if binary exists) — test first so a bad config never takes the running service down
     xray = subprocess.getoutput("command -v xray").strip()
+    rc = 0
     if xray:
-        r = subprocess.run([xray, "run", "-test", "-c", OUT], capture_output=True, text=True)
+        r = subprocess.run([xray, "run", "-test", "-config", OUT], capture_output=True, text=True)
         if r.returncode != 0:
-            print("sync-xray: WARNING xray config test FAIL:\n" + (r.stderr or r.stdout)[-800:]); return 1
-        print("sync-xray: xray config test OK")
+            print("sync-xray: WARNING xray config test FAIL:\n" + (r.stderr or r.stdout)[-800:])
+            # Fall back to the template-only seed config (no user accounts) so
+            # Xray can still start. The accounts are not lost - they re-sync
+            # on the next sync run once the cause above is fixed.
+            with open(OUT, "w") as f: json.dump(seed_cfg, f, indent=2)
+            print("sync-xray: fell back to the seed config (template only, no user accounts)")
+            r2 = subprocess.run([xray, "run", "-test", "-config", OUT], capture_output=True, text=True)
+            if r2.returncode != 0:
+                print("sync-xray: ERROR even the seed config fails the test:\n" + (r2.stderr or r2.stdout)[-800:])
+            else:
+                print("sync-xray: seed config test OK - Xray can start; user accounts will re-sync on the next sync run")
+            rc = 1
+        else:
+            print("sync-xray: xray config test OK")
     if "--restart" in sys.argv and os.path.exists("/run/systemd/system"):
         subprocess.run(["systemctl", "restart", "xray"], capture_output=True)
         print("sync-xray: xray restart attempted")
-    return 0
+    return rc
 
 if __name__ == "__main__":
     sys.exit(main())
