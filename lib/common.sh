@@ -517,3 +517,343 @@ ip_limit_exceeded() {
 limit_summary() {
   echo "Days: $(fmt_expiry "${1:-30}") | Data: $(fmt_data "${2:-0}") | IP Limit: $(fmt_logins "${3:-0}")"
 }
+
+# ===========================================================================
+# Extra protocols: SlowDNS (DNSTT), ZiVPN UDP, OpenVPN
+# ===========================================================================
+# SlowDNS: DNSTT server (official bamsoftware project, precompiled binary
+#   with a pinned SHA-256) listening on the PUBLIC interface at UDP 53 and
+#   forwarding tunnel streams to Dropbear (127.0.0.1:109) - so SlowDNS
+#   clients land on the normal SSH accounts. The stub resolver
+#   (systemd-resolved) keeps 127.0.0.53:53; we never bind that address.
+# ZiVPN UDP: the upstream ZiVPN UDP server binary (release udp-zivpn_1.4.9,
+#   pinned SHA-256) on UDP 5667 (+ DNAT of UDP 6000-19999 to 5667, the
+#   port range the ZiVPN app dials). Its password list is synced from the
+#   suite's SSH accounts by scripts/zivpn-sync.py.
+# OpenVPN: distro openvpn + easy-rsa, per-user certificates, UDP 1194.
+SLDNS_DIR="$CONFIG_DIR/slowdns"
+ZIVPN_DIR="$CONFIG_DIR/zivpn"
+OVPN_DIR="$CONFIG_DIR/openvpn"
+SLDNS_BIN_URL="https://dnstt-server-client.s3.amazonaws.com"
+SLDNS_SHA256_AMD64="bf291ed4b9988a82d5501bc45e23ceba6ff1e1b3439b43d73a94d4c9cc83ccd1"
+SLDNS_SHA256_ARM64="72a71d83356bab8388b25bb80b5fe3c1eb3c70115e77f9050cead0aaa1daccc2"
+ZIVPN_BIN_URL="https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9"
+ZIVPN_SHA256_AMD64="df6658c195882ff2f6cefb44050e8cb2c238ceb2b6e3fbefb931698f4f0519cb"
+ZIVPN_SHA256_ARM64="1bc3f0a46db2b4a4771dd08e68e2134c55d7c48874334ed7bba512d983bfa83a"
+
+proto_cfg() {
+  # proto_cfg <key> <default> - read a value from the panel config store
+  python3 - "$DATA_DIR/config.json" "$1" "$2" <<'PY' 2>/dev/null || echo "$2"
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    v = d.get(sys.argv[2])
+    print(v if v not in (None, "") else sys.argv[3])
+except Exception:
+    print(sys.argv[3])
+PY
+}
+
+proto_public_ip() {
+  local ip=""
+  ip="$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1)"
+  [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  echo "$ip"
+}
+
+proto_default_iface() {
+  ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1
+}
+
+slowdns_domain_default() {
+  local dom; dom="$(get_domain)"
+  [[ -z "$dom" ]] && dom="$(proto_cfg domain "")"
+  [[ -n "$dom" ]] && echo "dns.$dom" || echo ""
+}
+
+slowdns_domain() {
+  local d; d="$(proto_cfg slowdns_domain "")"
+  [[ -n "$d" ]] || d="$(slowdns_domain_default)"
+  echo "$d"
+}
+
+udp_domain() {
+  local d; d="$(proto_cfg udp_domain "")"
+  [[ -z "$d" ]] && d="$(get_domain)"
+  [[ -z "$d" ]] && d="$(proto_cfg domain "")"
+  echo "$d"
+}
+
+# Download one pinned binary (idempotent): $1=url $2=sha256 $3=dest
+proto_fetch_bin() {
+  local url="$1" want="$2" dest="$3" got=""
+  if [[ -f "$dest" ]]; then
+    got="$(sha256sum "$dest" 2>/dev/null | awk '{print $1}')"
+    [[ "$got" == "$want" ]] && return 0
+  fi
+  local tmp; tmp="$(mktemp)" || return 1
+  if curl -fsSL --max-time 120 "$url" -o "$tmp" 2>/dev/null; then
+    got="$(sha256sum "$tmp" | awk '{print $1}')"
+    if [[ "$got" == "$want" ]]; then
+      install -m 755 "$tmp" "$dest" && { rm -f "$tmp"; return 0; }
+    fi
+    warn "Checksum mismatch for $url - refusing to install it"
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+proto_arch_suffix() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo "amd64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    *) echo "" ;;
+  esac
+}
+
+ensure_slowdns() {
+  local arch; arch="$(proto_arch_suffix)"
+  [[ -n "$arch" ]] || { warn "SlowDNS: unsupported CPU architecture ($(uname -m)) - skipped"; return 1; }
+  mkdir -p "$SLDNS_DIR" || return 1
+  local sha_var="SLDNS_SHA256_$(echo "$arch" | tr 'a-z' 'A-Z')"
+  if [[ ! -x /usr/local/bin/sldns-server ]]; then
+    proto_fetch_bin "$SLDNS_BIN_URL/dnstt-server-linux-$arch" "${!sha_var}" /usr/local/bin/sldns-server \
+      || { warn "SlowDNS: the DNSTT server binary could not be downloaded/verified - SlowDNS is not installed yet (check the internet connection, then run Fix Stack)"; return 1; }
+    ok "SlowDNS: DNSTT server binary installed (checksum verified)"
+  fi
+  if [[ ! -s "$SLDNS_DIR/server.key" ]]; then
+    /usr/local/bin/sldns-server -gen-key -privkey-file "$SLDNS_DIR/server.key" -pubkey-file "$SLDNS_DIR/server.pub" >/dev/null 2>&1 \
+      && ok "SlowDNS: tunnel key pair generated" || { warn "SlowDNS: key generation failed"; return 1; }
+    chmod 600 "$SLDNS_DIR/server.key" 2>/dev/null || true
+  fi
+  # Launcher: resolves the domain + public IP at every start (the IP can
+  # change; the domain is a panel setting) and execs the server on
+  # <public IP>:53/udp - never on 127.0.0.53, so the box's own DNS stub
+  # keeps working.
+  cat > /usr/local/bin/vps-slowdns-run <<'EOF'
+#!/usr/bin/env bash
+# VPS Manager Suite - SlowDNS (DNSTT) launcher
+set -u
+DATA_DIR="${VPSMGR_DATA_DIR:-/var/lib/vps-manager}"
+CFG="$DATA_DIR/config.json"
+DOMAIN=""
+SDOMAIN=""
+if command -v python3 >/dev/null 2>&1 && [[ -f "$CFG" ]]; then
+  DOMAIN="$(python3 -c "import json;print(json.load(open('$CFG')).get('domain',''))" 2>/dev/null || echo "")"
+  SDOMAIN="$(python3 -c "import json;print(json.load(open('$CFG')).get('slowdns_domain',''))" 2>/dev/null || echo "")"
+fi
+[[ -n "$SDOMAIN" ]] || SDOMAIN="dns.$DOMAIN"
+# Bind address: the source address of the default route (an address this
+# box actually owns) first; the public-IP lookup only as a fallback.
+IP="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1)"
+[[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || IP="$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+[[ "$IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+[[ -n "$IP" ]] || { echo "SlowDNS: could not detect the public IPv4 address" >&2; exit 1; }
+exec /usr/local/bin/sldns-server -udp "$IP:53" -privkey-file /etc/vps-manager/slowdns/server.key "$SDOMAIN" 127.0.0.1:109
+EOF
+  chmod 755 /usr/local/bin/vps-slowdns-run
+  cat > /etc/systemd/system/vps-slowdns.service <<'EOF'
+[Unit]
+Description=VPS Manager Suite - SlowDNS (DNSTT) Server
+After=network.target dropbear.service
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vps-slowdns-run
+Restart=always
+RestartSec=3
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+[Install]
+WantedBy=multi-user.target
+EOF
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+  ok "SlowDNS: service ready (domain: $(slowdns_domain), UDP 53 -> Dropbear 109)"
+  return 0
+}
+
+ensure_zivpn() {
+  local arch; arch="$(proto_arch_suffix)"
+  [[ -n "$arch" ]] || { warn "ZiVPN: unsupported CPU architecture ($(uname -m)) - skipped"; return 1; }
+  mkdir -p "$ZIVPN_DIR" || return 1
+  local sha_var="ZIVPN_SHA256_$(echo "$arch" | tr 'a-z' 'A-Z')"
+  if [[ ! -x /usr/local/bin/zivpn ]]; then
+    proto_fetch_bin "$ZIVPN_BIN_URL/udp-zivpn-linux-$arch" "${!sha_var}" /usr/local/bin/zivpn \
+      || { warn "ZiVPN: the server binary could not be downloaded/verified - ZiVPN is not installed yet (check the internet connection, then run Fix Stack)"; return 1; }
+    ok "ZiVPN: server binary installed (checksum verified)"
+  fi
+  if [[ ! -s "$ZIVPN_DIR/zivpn.crt" || ! -s "$ZIVPN_DIR/zivpn.key" ]]; then
+    openssl req -new -newkey rsa:2048 -days 3650 -nodes -x509 \
+      -subj "/CN=zivpn" -keyout "$ZIVPN_DIR/zivpn.key" -out "$ZIVPN_DIR/zivpn.crt" >/dev/null 2>&1 \
+      && ok "ZiVPN: self-signed certificate generated" || warn "ZiVPN: certificate generation failed (openssl missing?)"
+    chmod 600 "$ZIVPN_DIR/zivpn.key" 2>/dev/null || true
+  fi
+  # Obfuscation string: one per install, stored in the panel config and
+  # shown on the SSH account card (clients must enter it in the app).
+  local obfs; obfs="$(proto_cfg zivpn_obfs "")"
+  if [[ -z "$obfs" ]]; then
+    obfs="$(gen_password)"
+    save_config_key zivpn_obfs "$obfs" || true
+    # The panel store is the live one - mirror the key there too.
+    python3 - "$DATA_DIR/config.json" "$obfs" <<'PY' 2>/dev/null || true
+import json, sys
+p, v = sys.argv[1], sys.argv[2]
+try:
+    d = json.load(open(p))
+except Exception:
+    d = {}
+d["zivpn_obfs"] = v
+json.dump(d, open(p, "w"), indent=2)
+PY
+  fi
+  # Password list = the suite's SSH accounts (see scripts/zivpn-sync.py)
+  local syncer=""
+  for _c in "$SCRIPT_DIR/scripts/zivpn-sync.py" "/opt/vps-manager-suite/scripts/zivpn-sync.py"; do
+    [[ -f "$_c" ]] && { syncer="$_c"; break; }
+  done
+  if [[ -n "$syncer" ]]; then
+    VPSMGR_DATA_DIR="$DATA_DIR" VPSMGR_CONFIG_DIR="$CONFIG_DIR" python3 "$syncer" || warn "ZiVPN: password sync failed"
+  else
+    # Fallback: a single starter password so the service can run
+    python3 - "$ZIVPN_DIR/config.json" "$obfs" <<'PY' 2>/dev/null || true
+import json, sys
+cfg = {"listen": ":5667", "cert": "/etc/vps-manager/zivpn/zivpn.crt",
+       "key": "/etc/vps-manager/zivpn/zivpn.key",
+       "auth": {"mode": "passwords", "config": ["zi"]}, "obfs": sys.argv[2]}
+json.dump(cfg, open(sys.argv[1], "w"), indent=2)
+PY
+  fi
+  cat > /etc/systemd/system/vps-zivpn.service <<'EOF'
+[Unit]
+Description=VPS Manager Suite - ZiVPN UDP Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/vps-manager/zivpn
+ExecStart=/usr/local/bin/zivpn server -c /etc/vps-manager/zivpn/config.json
+Restart=always
+RestartSec=3
+Environment=ZIVPN_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
+EOF
+  # Bigger UDP buffers (the upstream server is QUIC-based)
+  cat > /etc/sysctl.d/99-vps-zivpn.conf <<'EOF'
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+EOF
+  sysctl -w net.core.rmem_max=16777216 >/dev/null 2>&1 || true
+  sysctl -w net.core.wmem_max=16777216 >/dev/null 2>&1 || true
+  # The ZiVPN app dials UDP ports 6000-19999 - DNAT that range to the
+  # server on 5667 (idempotent; only on the default-route interface).
+  local iface; iface="$(proto_default_iface)"
+  if [[ -n "$iface" ]] && command -v iptables >/dev/null 2>&1; then
+    iptables -t nat -C PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null \
+      || iptables -t nat -A PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null \
+      || warn "ZiVPN: could not add the UDP 6000-19999 redirect rule"
+  fi
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+  ok "ZiVPN: service ready (UDP 5667; app ports 6000-19999 -> 5667)"
+  return 0
+}
+
+ensure_openvpn() {
+  if ! command -v openvpn >/dev/null 2>&1 || [[ ! -x /usr/share/easy-rsa/easyrsa ]]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      info "OpenVPN: installing the openvpn + easy-rsa packages..."
+      DEBIAN_FRONTEND=noninteractive apt-get install -y openvpn easy-rsa >/dev/null 2>&1 || true
+    fi
+  fi
+  command -v openvpn >/dev/null 2>&1 || { warn "OpenVPN: the openvpn package is not available - OpenVPN is not installed yet (install it, then run Fix Stack)"; return 1; }
+  [[ -x /usr/share/easy-rsa/easyrsa ]] || { warn "OpenVPN: easy-rsa is not available - OpenVPN accounts cannot be issued yet (install easy-rsa, then run Fix Stack)"; return 1; }
+  mkdir -p "$OVPN_DIR/profiles" || return 1
+  if [[ ! -d "$OVPN_DIR/easy-rsa" ]]; then
+    cp -a /usr/share/easy-rsa "$OVPN_DIR/easy-rsa" 2>/dev/null || { warn "OpenVPN: could not stage easy-rsa"; return 1; }
+  fi
+  local ER="$OVPN_DIR/easy-rsa"
+  if [[ ! -s "$OVPN_DIR/pki/ca.crt" ]]; then
+    info "OpenVPN: building the certificate authority (one-time)..."
+    ( cd "$ER" && export EASYRSA_PKI="$OVPN_DIR/pki" EASYRSA_BATCH=1 \
+      && ./easyrsa init-pki >/dev/null 2>&1 \
+      && EASYRSA_REQ_CN="DDK VPS Manager CA" ./easyrsa build-ca nopass >/dev/null 2>&1 \
+      && ./easyrsa gen-req server nopass >/dev/null 2>&1 \
+      && ./easyrsa sign-req server server >/dev/null 2>&1 \
+      && ./easyrsa gen-dh >/dev/null 2>&1 \
+      && ./easyrsa gen-crl >/dev/null 2>&1 ) \
+      && ok "OpenVPN: CA + server certificate ready" || { warn "OpenVPN: PKI build failed - see $OVPN_DIR/pki"; return 1; }
+    openvpn --genkey secret "$OVPN_DIR/ta.key" >/dev/null 2>&1 || true
+    chmod 600 "$OVPN_DIR/pki/private/ca.key" "$OVPN_DIR/ta.key" 2>/dev/null || true
+  fi
+  cp -f "$OVPN_DIR/pki/crl.pem" "$OVPN_DIR/crl.pem" 2>/dev/null || true
+  cat > "$OVPN_DIR/server.conf" <<EOF
+port 1194
+proto udp
+dev tun
+ca $OVPN_DIR/pki/ca.crt
+cert $OVPN_DIR/pki/issued/server.crt
+key $OVPN_DIR/pki/private/server.key
+dh $OVPN_DIR/pki/dh.pem
+tls-auth $OVPN_DIR/ta.key 0
+crl-verify $OVPN_DIR/crl.pem
+server 10.8.0.0 255.255.255.0
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
+push "dhcp-option DNS 8.8.8.8"
+keepalive 10 120
+cipher AES-256-GCM
+auth SHA256
+persist-key
+persist-tun
+status $OVPN_DIR/openvpn-status.log
+explicit-exit-notify 1
+verb 3
+EOF
+  # Routing: forward + NAT for the client pool
+  cat > /etc/sysctl.d/99-vps-openvpn.conf <<'EOF'
+net.ipv4.ip_forward=1
+EOF
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  local iface; iface="$(proto_default_iface)"
+  if [[ -n "$iface" ]] && command -v iptables >/dev/null 2>&1; then
+    iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "$iface" -j MASQUERADE 2>/dev/null \
+      || iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$iface" -j MASQUERADE 2>/dev/null \
+      || warn "OpenVPN: could not add the NAT rule for the client pool"
+  fi
+  cat > /etc/systemd/system/vps-openvpn.service <<'EOF'
+[Unit]
+Description=VPS Manager Suite - OpenVPN Server
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/sbin/openvpn --config /etc/vps-manager/openvpn/server.conf
+Restart=always
+RestartSec=3
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+[Install]
+WantedBy=multi-user.target
+EOF
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+  ok "OpenVPN: service ready (UDP 1194, pool 10.8.0.0/24)"
+  return 0
+}
+
+ensure_protocols() {
+  ensure_slowdns || true
+  ensure_zivpn || true
+  ensure_openvpn || true
+}
+
+# Remove the firewall/sysctl traces of the extra protocols (uninstall)
+proto_remove_traces() {
+  local iface; iface="$(proto_default_iface)"
+  if command -v iptables >/dev/null 2>&1; then
+    [[ -n "$iface" ]] && iptables -t nat -D PREROUTING -i "$iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || true
+    [[ -n "$iface" ]] && iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o "$iface" -j MASQUERADE 2>/dev/null || true
+  fi
+  rm -f /etc/sysctl.d/99-vps-zivpn.conf /etc/sysctl.d/99-vps-openvpn.conf 2>/dev/null || true
+}
