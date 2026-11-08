@@ -30,6 +30,9 @@ The script asks for your domain itself. After the install, use `vpsmenu` for the
 - **Web Panel (9090)** — Dashboard, SSH Accounts, Xray Accounts, Services, VPS Stats & Speedtest, Telegram Bot, Settings, Panel Admins, Activity/Audit Log
 - **Full Account Lifecycle** — Create, Renew, Edit Limits, Reset Usage, Lock, Unlock and Delete for SSH and Xray accounts — from the terminal, the panel **and** the Telegram bot
 - **SSH** — Dropbear based, Direct / SSL / WS / WS-SSL, with an auto-generated payload
+- **SlowDNS** — DNSTT DNS tunnel on UDP 53 straight into the SSH service: clients use their normal **SSH username + password** with the SlowDNS NS host (Settings → SlowDNS Domain, default `dns.` + your domain)
+- **ZiVPN UDP** — UDP 5667 (app ports 6000-19999 redirected to it); the password list is **synced from the SSH accounts**, so one account works for SSH, SlowDNS and ZiVPN UDP
+- **OpenVPN** — per-user certificates (UDP 1194) with create / renew / revoke in the panel and a ready-to-import **.ovpn** profile download on every account
 - **Xray** — VMess / VLESS / Trojan, **5 links per account for every protocol**: WS, WS-TLS, TCP-TLS, XHTTP-TLS, XHTTP-NTLS — plus a QR code for each link in the panel
 - **Fast Limit Monitor** — expiry, GB quota and IP limits enforced every **4 seconds** (SSH and Xray), with distinct Active / EXPIRED / GB-LIMIT / IP-LIMIT / LOCKED states and auto-delete of long-dead accounts (grace period, countdown shown)
 - **Connected Users View** — live connected IPs for SSH and Xray, with the real client IP (PROXY-protocol + header recovery) and country, plus session kick
@@ -136,7 +139,25 @@ Enforcement runs every **4 seconds** (`vps-monitor` service): expired accounts a
 | 8443 · 8446 · 8447 | Xray TCP-TLS — VLESS · Trojan · VMess |
 | 8444 · 8445 · 8448 | Xray XHTTP-TLS — VLESS · Trojan · VMess |
 | 10443 | Xray VLESS TLS fallback |
+| 53 (UDP) | SlowDNS (DNSTT) — needs the NS record below |
+| 5667 (UDP) | ZiVPN UDP server (app ports 6000-19999 UDP redirect to it) |
+| 1194 (UDP) | OpenVPN |
 | 9090 | Web Panel (HTTPS) |
+
+### SlowDNS — one DNS record (one-time setup)
+
+SlowDNS works only after you delegate its host to the VPS. At your DNS
+provider create **one NS record**:
+
+| Type | Host | Value (target) |
+|---|---|---|
+| NS | the SlowDNS host, e.g. `dns.my7` for `dns.my7.ddkvps.com` | your server domain, e.g. `my7.ddkvps.com` |
+
+In words: an NS record for **dns.my7.ddkvps.com** pointing to
+**my7.ddkvps.com** (adjust to your own domain). The exact record for your
+setup is shown in the panel under **Settings → SlowDNS Domain** and at the
+end of the installer. The SlowDNS host itself stays editable in Settings;
+changing it restarts the SlowDNS service.
 
 ## 📂 Project Structure
 

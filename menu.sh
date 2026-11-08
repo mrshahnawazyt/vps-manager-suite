@@ -562,7 +562,11 @@ PY
 )
       box_line "Accounts SSH/Xray: $_counts"
       echo "$BOX_EDGE"
-      for s in nginx haproxy xray dropbear ws-proxy vps-panel vps-monitor vps-bot; do printf -v _sl '%-11s: %s' "$s" "$(service_status "$s")"; box_line "$_sl"; done
+      for s in nginx haproxy xray dropbear ws-proxy vps-panel vps-monitor vps-bot vps-slowdns vps-zivpn vps-openvpn; do printf -v _sl '%-13s: %s' "$s" "$(service_status "$s")"; box_line "$_sl"; done
+      _sd=$(python3 -c "import json;d=json.load(open('$DATA/config.json'));print(d.get('slowdns_domain',''))" 2>/dev/null || echo "")
+      [[ -n "$_sd" ]] && box_line "SlowDNS NS: $_sd"
+      box_line "ZiVPN UDP : 5667 (apps 6000-19999)"
+      box_line "OpenVPN   : UDP 1194"
       echo "$BOX_EDGE"
       _up=""; for p in 22 80 443 109 143 8080 8443 8446 8447 9090; do ss -tln 2>/dev/null | grep -q "[:.]$p[[:space:]]" && _up="$_up $p"; done
       box_line "Key ports up:${_up:- none}"

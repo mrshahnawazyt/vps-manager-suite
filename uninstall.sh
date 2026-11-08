@@ -37,11 +37,20 @@ fi
 # --- 1) Stop + disable services ---
 step "Stopping services..."
 if command -v systemctl >/dev/null 2>&1; then
-  for svc in vps-panel ws-proxy xray haproxy nginx dropbear vps-monitor vps-bot; do
+  for svc in vps-panel ws-proxy xray haproxy nginx dropbear vps-monitor vps-bot vps-slowdns vps-zivpn vps-openvpn; do
     systemctl disable --now "$svc" >/dev/null 2>&1 || true
     systemctl stop "$svc" >/dev/null 2>&1 || true
   done
 fi
+# Extra protocols: remove their firewall rules + sysctl drop-ins
+if [[ -z "$ROOT" ]] && command -v iptables >/dev/null 2>&1; then
+  _iface=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n1)
+  if [[ -n "$_iface" ]]; then
+    iptables -t nat -D PREROUTING -i "$_iface" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 >/dev/null 2>&1 || true
+    iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o "$_iface" -j MASQUERADE >/dev/null 2>&1 || true
+  fi
+fi
+rm -f "$ROOT/etc/sysctl.d/99-vps-zivpn.conf" "$ROOT/etc/sysctl.d/99-vps-openvpn.conf" 2>/dev/null || true
 # QoS rules (HTB classes + iptables marks) belong to the suite too
 if [[ -z "$ROOT" && -f "$(dirname "$0")/scripts/qos.sh" ]]; then
   bash "$(dirname "$0")/scripts/qos.sh" off >/dev/null 2>&1 || true
@@ -52,7 +61,10 @@ ok "Services stopped."
 rm -f "$ROOT/etc/systemd/system/vps-panel.service" \
       "$ROOT/etc/systemd/system/ws-proxy.service" \
       "$ROOT/etc/systemd/system/vps-monitor.service" \
-      "$ROOT/etc/systemd/system/vps-bot.service" 2>/dev/null || true
+      "$ROOT/etc/systemd/system/vps-bot.service" \
+      "$ROOT/etc/systemd/system/vps-slowdns.service" \
+      "$ROOT/etc/systemd/system/vps-zivpn.service" \
+      "$ROOT/etc/systemd/system/vps-openvpn.service" 2>/dev/null || true
 rm -rf "$ROOT/etc/systemd/system/xray.service.d" 2>/dev/null || true
 rm -f "$ROOT/etc/letsencrypt/renewal-hooks/deploy/vps-manager.sh" 2>/dev/null || true
 if command -v systemctl >/dev/null 2>&1; then
@@ -99,7 +111,10 @@ rm -f "$ROOT/usr/local/bin/vps-panel.py" \
       "$ROOT/usr/local/bin/vps-ws-proxy.py" \
       "$ROOT/usr/local/bin/vpsmenu" \
       "$ROOT/usr/local/bin/menu" \
-      "$ROOT/usr/local/bin/vpsupdate" 2>/dev/null || true
+      "$ROOT/usr/local/bin/vpsupdate" \
+      "$ROOT/usr/local/bin/sldns-server" \
+      "$ROOT/usr/local/bin/vps-slowdns-run" \
+      "$ROOT/usr/local/bin/zivpn" 2>/dev/null || true
 ok "Commands (vpsmenu/vpsupdate) removed."
 
 # --- 6) Remove our Xray config (keep the binary) ---

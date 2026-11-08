@@ -214,11 +214,19 @@ if declare -F build_haproxy_pem >/dev/null 2>&1; then
     || echo "[update] Warning: no SSL certificate pair found - HAProxy 443 stays down until SSL is issued (menu option 03)."
 fi
 
+# Extra protocols: an install that predates them gains SlowDNS, ZiVPN UDP
+# and OpenVPN here (binaries, keys/certs, configs, units, firewall rules);
+# an existing setup is healed and the ZiVPN password list re-synced.
+if declare -F ensure_protocols >/dev/null 2>&1; then
+  echo "[update] Setting up the extra protocols (SlowDNS / ZiVPN UDP / OpenVPN)..."
+  ensure_protocols || true
+fi
+
 # Restart the services (where present)
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable vps-monitor 2>/dev/null || true
-  for s in nginx haproxy vps-panel ws-proxy xray vps-monitor; do systemctl restart "$s" 2>/dev/null || true; done
+  for s in nginx haproxy vps-panel ws-proxy xray vps-monitor vps-slowdns vps-zivpn vps-openvpn; do systemctl restart "$s" 2>/dev/null || true; done
   # restart the bot only if it was running (never start it unconfigured)
   systemctl is-active --quiet vps-bot 2>/dev/null && systemctl restart vps-bot 2>/dev/null || true
 fi
@@ -240,6 +248,20 @@ if command -v systemctl >/dev/null 2>&1; then
     fi
   done
 fi
+# The extra protocols are verified separately: a protocol that cannot run
+# yet (for example its binary could not be downloaded) must not fail the
+# core update verdict, but it is named loudly all the same.
+_upd_proto_down=""
+if command -v systemctl >/dev/null 2>&1; then
+  for s in vps-slowdns vps-zivpn vps-openvpn; do
+    if [[ -f "/etc/systemd/system/$s.service" ]] && ! systemctl is-active --quiet "$s" 2>/dev/null; then
+      systemctl start "$s" 2>/dev/null || true
+      sleep 1
+      systemctl is-active --quiet "$s" 2>/dev/null || _upd_proto_down="$_upd_proto_down $s"
+    fi
+  done
+fi
+[[ -n "$_upd_proto_down" ]] && echo "[WARNING] Extra protocol service(s) NOT running:$_upd_proto_down - diagnose: systemctl status <service> | journalctl -u <service> -n 30 --no-pager | or run menu option 06 (Fix Stack)."
 if [[ -n "$_upd_down" ]]; then
   echo "[WARNING] UPDATE APPLIED, but these services are NOT running:$_upd_down"
   echo "[WARNING] The new version is in place; a service that will not start usually has a config or certificate problem."

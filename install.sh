@@ -49,10 +49,10 @@ apt-get update -y
 # firewall, which avoids any risk of ports like 9090/443 being blocked.
 # openssl is required (self-signed fallback and certs for Xray/Panel).
 # Core packages: available on every supported Ubuntu (18.04 - 25.x).
-apt-get install -y curl wget unzip jq nginx haproxy dropbear certbot python3 python3-pip iproute2 openssl uuid-runtime cron
+apt-get install -y curl wget unzip jq nginx haproxy dropbear certbot python3 python3-pip iproute2 openssl uuid-runtime cron openvpn
 # Optional packages: names/availability differ on some versions -
 # if one is not found, skip it; the rest of the install must not stop.
-for _pkg in stunnel4 speedtest-cli; do
+for _pkg in stunnel4 speedtest-cli easy-rsa; do
   apt-get install -y "$_pkg" 2>/dev/null || warn "$_pkg was not found on this version - skipping."
 done
 
@@ -78,8 +78,10 @@ if os.path.exists(p):
     try: d=json.load(open(p))
     except: d={}
 d.update({"domain":sys.argv[2],"banner":d.get("banner","DDK VPS Manager"),"qos_interface":d.get("qos_interface","eth0"),"qos_rate":d.get("qos_rate","950mbit"),"per_client_cap":0})
+d.setdefault("slowdns_domain","dns."+sys.argv[2])
+d.setdefault("udp_domain",sys.argv[2])
 json.dump(d,open(p,"w"),indent=2)
-for f in ("ssh_users.json","xray_users.json","activity.json"):
+for f in ("ssh_users.json","xray_users.json","activity.json","openvpn_users.json"):
     fp=os.path.join(os.path.dirname(p),f)
     if not os.path.exists(fp): json.dump([],open(fp,"w"))
 PY
@@ -269,9 +271,13 @@ done
 printf '#!/usr/bin/env bash\nexec bash %s/update.sh "$@"\n' "$SCRIPT_DIR" > /usr/local/bin/vpsupdate
 chmod +x /usr/local/bin/vpsupdate
 
+# 11b) Extra protocols: SlowDNS (DNSTT), ZiVPN UDP, OpenVPN
+info "Setting up the extra protocols (SlowDNS / ZiVPN UDP / OpenVPN)..."
+ensure_protocols
+
 # 12) Services enable + health check
 systemctl daemon-reload || true
-for svc in nginx haproxy dropbear ws-proxy vps-panel xray vps-monitor; do systemctl enable --now "$svc" 2>/dev/null && ok "$svc up" || warn "$svc failed to start - check: systemctl status $svc"; done
+for svc in nginx haproxy dropbear ws-proxy vps-panel xray vps-monitor vps-slowdns vps-zivpn vps-openvpn; do systemctl enable --now "$svc" 2>/dev/null && ok "$svc up" || warn "$svc failed to start - check: systemctl status $svc"; done
 # 'enable --now' does NOT restart an already-running service - so restart the
 # panel explicitly, so the new panel.py and the SSL certificate issued in this
 # install are loaded immediately (otherwise the panel stays on old code / HTTP).
@@ -284,6 +290,9 @@ systemctl restart xray 2>/dev/null && ok "xray restarted (fresh config + certifi
 # unreadable key) - verify the real state and show the log if it is down.
 verify_xray_running || true
 
+SDOMAIN="$(slowdns_domain)"; SDOMAIN="${SDOMAIN:-dns.$DOMAIN}"
+SLDNS_PUB=""; [[ -s "$CONFIG_DIR/slowdns/server.pub" ]] && SLDNS_PUB=$(cat "$CONFIG_DIR/slowdns/server.pub")
+UDOMAIN="$(udp_domain)"; UDOMAIN="${UDOMAIN:-$DOMAIN}"
 IP=$(curl -s --max-time 5 https://api.ipify.org || ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -n1 || hostname -I 2>/dev/null | awk '{print $1}')
 EXPIRY_DATE=$(date -d "+365 days" +%F 2>/dev/null || echo "-")
 log_activity "install completed for $DOMAIN"
@@ -308,6 +317,16 @@ cat <<EOF
   SSH Dropbear : 109, 143, 447
   SSH WS       : 80 (HTTP) | 443 (WS+SSL/TLS)
   Python Proxy : $WS_PORT (ws-proxy -> 109)
+  SlowDNS      : $SDOMAIN (UDP 53 -> SSH)
+                 Public key: $SLDNS_PUB
+                 ACTION at your DNS provider:
+                 create an NS record for the
+                 host $SDOMAIN pointing to
+                 $DOMAIN (one-time setup)
+  ZiVPN UDP    : $UDOMAIN (UDP 5667,
+                 app ports 6000-19999)
+  OpenVPN      : $DOMAIN (UDP 1194,
+                 accounts in the panel)
   Nginx        : 127.0.0.1:18080 (internal)
   Xray         : VMess /vmess, VLESS /vless
                  Trojan /trojan, XHTTP /xhttp
