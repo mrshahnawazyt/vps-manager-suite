@@ -1080,17 +1080,26 @@ def ssh_result_cards(uname, pwd, domain, created, exp, exp_date, gb, ipl, loc):
     ws_port = to_int(_cfg.get("ws_proxy_port", 8080), 8080)
     sd_host = slowdns_host(_cfg); sd_pub = slowdns_pubkey()
     sd_line = f"{html.escape(sd_host)} : 53" if sd_host else "not configured"
+    sd_key_block = ""
     if sd_pub:
-        sd_line += f" · key {html.escape(sd_pub[:16])}…"
+        sd_key_block = ("<h3 style='margin-top:16px'>SlowDNS Public Key</h3>"
+                        "<div class='codebox'><button type='button' class='copybtn' onclick=\"copyText('new-ssh-slowdns-key', this)\">Copy</button>"
+                        f"<pre id='new-ssh-slowdns-key'>{html.escape(sd_pub)}</pre></div>")
     zi_host = udp_host(_cfg)
     zi_line = f"{html.escape(zi_host)} : 5667 (app ports 6000-19999)" if zi_host else "not configured"
     _obfs = str(_cfg.get("zivpn_obfs") or "").strip()
-    if _obfs:
-        zi_line += f" · obfs {html.escape(_obfs)}"
+    zi_block = ""
+    if zi_host:
+        zi_info = f"Server: {html.escape(zi_host)}:5667\nApp ports: 6000-19999"
+        if _obfs:
+            zi_info += f"\nObfs: {html.escape(_obfs)}"
+        zi_block = ("<h3 style='margin-top:16px'>ZiVPN UDP</h3>"
+                    "<div class='codebox'><button type='button' class='copybtn' onclick=\"copyText('new-ssh-zivpn', this)\">Copy</button>"
+                    f"<pre id='new-ssh-zivpn'>{zi_info}</pre></div>")
     vpn_details = f"{html.escape(domain)}:443@{html.escape(uname)}:{html.escape(pwd)}"
     return f"""<div class='card result'><h3>🔐 SSH Account Created</h3><div class='kv'>
-    <div><div class='k'>Username</div><div class='v'>{html.escape(uname)}</div></div>
-    <div><div class='k'>Password</div><div class='v'><code>{html.escape(pwd)}</code></div></div>
+    <div><div class='k'>Username</div><div class='v'><span id='new-ssh-user'>{html.escape(uname)}</span> <button type='button' class='small ghost' style='margin-left:6px' onclick="copyText('new-ssh-user', this)">Copy</button></div></div>
+    <div><div class='k'>Password</div><div class='v'><code id='new-ssh-pass'>{html.escape(pwd)}</code> <button type='button' class='small ghost' style='margin-left:6px' onclick="copyText('new-ssh-pass', this)">Copy</button></div></div>
     <div><div class='k'>Host / Domain</div><div class='v'>{html.escape(domain)}</div></div>
     <div><div class='k'>SNI</div><div class='v'>{html.escape(domain)}</div></div>
     <div><div class='k'>City</div><div class='v'>{html.escape(loc.get('city','') or '-')}</div></div>
@@ -1107,7 +1116,9 @@ def ssh_result_cards(uname, pwd, domain, created, exp, exp_date, gb, ipl, loc):
     <div><div class='k'>SlowDNS</div><div class='v'>{sd_line}</div></div>
     <div><div class='k'>ZiVPN UDP</div><div class='v'>{zi_line}</div></div>
     </div>
-    <p class='mut' style='margin-top:10px'>SlowDNS: use your SSH username + password with the SlowDNS NS host above (full public key: Settings page / SlowDNS service). ZiVPN UDP: same SSH password, server = the UDP host, obfs as shown.</p>
+    <p class='mut' style='margin-top:10px'>SlowDNS: use your SSH username + password with the SlowDNS NS host above and the public key below. ZiVPN UDP: same SSH password - the connection details are in the ZiVPN UDP block below.</p>
+    {sd_key_block}
+    {zi_block}
     <h3 style='margin-top:16px'>VPN Details</h3>
     <div class='codebox'><button type='button' class='copybtn' onclick="copyText('new-ssh-vpn', this)">Copy</button><pre id='new-ssh-vpn'>{vpn_details}</pre></div>
     </div>
