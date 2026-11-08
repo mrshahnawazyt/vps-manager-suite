@@ -127,6 +127,95 @@ def sync_xray(emit=None):
     except Exception: pass
 def save_config(c): save_json("config.json", c)
 
+# --- Extra protocols: SlowDNS / ZiVPN UDP / OpenVPN --------------------------
+SUITE_CONFIG_DIR = os.environ.get("VPSMGR_CONFIG_DIR", "/etc/vps-manager")
+_HOST_LABEL = __import__("re").compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+def valid_hostname(v):
+    v = str(v or "").strip().rstrip(".")
+    if not v or len(v) > 253:
+        return False
+    return all(_HOST_LABEL.match(part) for part in v.split("."))
+
+def slowdns_host(cfg=None):
+    cfg = cfg if cfg is not None else load_config()
+    v = str(cfg.get("slowdns_domain") or "").strip()
+    if v:
+        return v
+    dom = str(cfg.get("domain") or "").strip()
+    return ("dns." + dom) if dom else ""
+
+def udp_host(cfg=None):
+    cfg = cfg if cfg is not None else load_config()
+    return str(cfg.get("udp_domain") or cfg.get("domain") or "").strip()
+
+def slowdns_pubkey():
+    try:
+        with open(os.path.join(SUITE_CONFIG_DIR, "slowdns", "server.pub")) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+def zivpn_sync(emit=None):
+    """Rebuild the ZiVPN password list from the SSH accounts (best-effort).
+    Called after SSH account changes so one account keeps working for
+    SSH, SlowDNS and ZiVPN UDP."""
+    cand = suite_script("zivpn-sync.py")
+    if not cand:
+        return
+    env = dict(os.environ); env["VPSMGR_DATA_DIR"] = DATA_DIR; env["VPSMGR_CONFIG_DIR"] = SUITE_CONFIG_DIR
+    try:
+        if emit is not None:
+            proc = subprocess.run(["python3", cand], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  universal_newlines=True, timeout=20, env=env)
+            for line in (proc.stdout or "").splitlines():
+                emit("[OK] " + line)
+        else:
+            subprocess.run(["python3", cand], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20, env=env)
+    except Exception:
+        pass
+
+def apply_protocol_domains(cfg, data):
+    """Validate + apply the SlowDNS / UDP domain settings onto cfg.
+    Returns (slowdns_effective_changed, notes). Invalid hostnames are
+    rejected with a note and the previous value is kept. Clearing the
+    SlowDNS field restores the default (dns. + server domain)."""
+    notes = []
+    before = slowdns_host(cfg)
+    if "slowdns_domain" in data:
+        v = str(data.get("slowdns_domain") or "").strip().rstrip(".")
+        if v and not valid_hostname(v):
+            notes.append(f"[WARN] SlowDNS Domain '{v}' is not a valid hostname - the previous value was kept.")
+        else:
+            cfg["slowdns_domain"] = v
+    if "udp_domain" in data:
+        v = str(data.get("udp_domain") or "").strip().rstrip(".")
+        if v and not valid_hostname(v):
+            notes.append(f"[WARN] UDP Domain '{v}' is not a valid hostname - the previous value was kept.")
+        elif v != str(cfg.get("udp_domain") or ""):
+            cfg["udp_domain"] = v
+            notes.append(f"[OK] UDP Domain set to {v or '(server domain)'}")
+    after = slowdns_host(cfg)
+    if after != before:
+        notes.append(f"[OK] SlowDNS Domain is now {after}")
+    return (after != before), notes
+
+def restart_slowdns(emit=None):
+    try:
+        subprocess.run(["systemctl", "restart", "vps-slowdns"], timeout=20,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if emit is not None:
+            emit("[OK] SlowDNS service restarted with the new domain")
+    except Exception:
+        if emit is not None:
+            emit("[WARN] Could not restart the SlowDNS service from the panel - restart vps-slowdns to apply the new domain.")
+
+def openvpn_users():
+    return load_json("openvpn_users.json", [])
+
+def openvpn_script():
+    return suite_script("openvpn-user.sh")
+
 CTX = threading.local()  # per-request context for the audit log
 
 def log_activity(action):
@@ -498,7 +587,7 @@ def vnstat_section(role):
             f"<h4>Monthly</h4><pre class='raw'>{_h.escape(monthly)}</pre>")
 
 def service_list():
-    names = ["nginx", "haproxy", "xray", "dropbear", "ssh", "ws-proxy", "vps-panel", "vps-monitor", "vps-bot", "cron", "systemd-resolved"]
+    names = ["nginx", "haproxy", "xray", "dropbear", "ssh", "ws-proxy", "vps-panel", "vps-monitor", "vps-bot", "vps-slowdns", "vps-zivpn", "vps-openvpn", "cron", "systemd-resolved"]
     out = []
     for n in names:
         status = "unknown"
@@ -872,6 +961,7 @@ NAV_ITEMS = [
     ("/", "Dashboard", "▦"),
     ("/ssh", "SSH Accounts", "🔑"),
     ("/xray", "Xray Accounts", "🌐"),
+    ("/openvpn", "OpenVPN", "🛡"),
     ("/services", "Running Services", "⚙"),
     ("/stats", "VPS Stats", "📊"),
     ("/telegram", "Telegram Bot", "✈"),
@@ -986,7 +1076,17 @@ def ssh_result_cards(uname, pwd, domain, created, exp, exp_date, gb, ipl, loc):
     """The result cards shown after an SSH account is created - used by the
     classic result page AND as the closing fragment of the popup stream."""
     payload = f"GET /sshws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]"
-    ws_port = to_int(load_config().get("ws_proxy_port", 8080), 8080)
+    _cfg = load_config()
+    ws_port = to_int(_cfg.get("ws_proxy_port", 8080), 8080)
+    sd_host = slowdns_host(_cfg); sd_pub = slowdns_pubkey()
+    sd_line = f"{html.escape(sd_host)} : 53" if sd_host else "not configured"
+    if sd_pub:
+        sd_line += f" · key {html.escape(sd_pub[:16])}…"
+    zi_host = udp_host(_cfg)
+    zi_line = f"{html.escape(zi_host)} : 5667 (app ports 6000-19999)" if zi_host else "not configured"
+    _obfs = str(_cfg.get("zivpn_obfs") or "").strip()
+    if _obfs:
+        zi_line += f" · obfs {html.escape(_obfs)}"
     vpn_details = f"{html.escape(domain)}:443@{html.escape(uname)}:{html.escape(pwd)}"
     return f"""<div class='card result'><h3>🔐 SSH Account Created</h3><div class='kv'>
     <div><div class='k'>Username</div><div class='v'>{html.escape(uname)}</div></div>
@@ -1004,7 +1104,10 @@ def ssh_result_cards(uname, pwd, domain, created, exp, exp_date, gb, ipl, loc):
     <div><div class='k'>SSH WS</div><div class='v'>80 → /sshws</div></div>
     <div><div class='k'>SSH WS-SSL</div><div class='v'>443 → /sshws</div></div>
     <div><div class='k'>Python Proxy</div><div class='v'>{ws_port}</div></div>
+    <div><div class='k'>SlowDNS</div><div class='v'>{sd_line}</div></div>
+    <div><div class='k'>ZiVPN UDP</div><div class='v'>{zi_line}</div></div>
     </div>
+    <p class='mut' style='margin-top:10px'>SlowDNS: use your SSH username + password with the SlowDNS NS host above (full public key: Settings page / SlowDNS service). ZiVPN UDP: same SSH password, server = the UDP host, obfs as shown.</p>
     <h3 style='margin-top:16px'>VPN Details</h3>
     <div class='codebox'><button type='button' class='copybtn' onclick="copyText('new-ssh-vpn', this)">Copy</button><pre id='new-ssh-vpn'>{vpn_details}</pre></div>
     </div>
@@ -1026,6 +1129,19 @@ def xray_result_cards(remark, proto, uid, domain, created, exp, exp_date, gb, ip
     </div></div>
     <div class='card'><h3>Links</h3>{links_html(links, 'new-xr')}
     <p><a class='btn ghost' href='/xray'>Back to Xray Accounts</a></p></div>"""
+
+def openvpn_result_card(name, days, exp_date, domain, profile_text):
+    nm = html.escape(str(name))
+    prof = html.escape(profile_text or "")
+    return f"""<div class='card result'><h3>🛡 OpenVPN Account Created</h3><div class='kv'>
+    <div><div class='k'>Username</div><div class='v'>{nm}</div></div>
+    <div><div class='k'>Server</div><div class='v'>{html.escape(domain)} : 1194 (UDP)</div></div>
+    <div><div class='k'>Certificate expires</div><div class='v'>{exp_date} ({fmt_expiry(days)})</div></div>
+    </div>
+    <p style='margin-top:10px'><a class='btn' href='/openvpn/download?name={nm}'>Download .ovpn profile</a></p>
+    <h3 style='margin-top:16px'>Profile (.ovpn)</h3>
+    <div class='codebox'><button type='button' class='copybtn' onclick="copyText('new-ovpn-profile', this)">Copy</button><pre id='new-ovpn-profile'>{prof}</pre></div>
+    <p style='margin-top:14px'><a class='btn ghost' href='/openvpn'>Back to OpenVPN Accounts</a></p></div>"""
 
 RULE_NOTE = ("<p class='mut'>Rule: <b>Days is a literal count</b> (default 30) - Expiry = creation date + Days. "
              "Only the <b>GB limit</b> and <b>IP limit</b> treat <b>0 as unlimited</b>. "
@@ -1331,6 +1447,7 @@ class Handler(BaseHTTPRequestHandler):
             log_activity(f"ssh {'lock' if locked else 'unlock'} {uname}")
             save_json("ssh_users.json", users)
             emit(f"[OK] '{uname}' is {'locked' if locked else 'unlocked'}")
+        zivpn_sync()
         emit("[OK] Done - close this popup to refresh the list.")
     def _xray_op_stream(self, p, data):
         """Popup-streamed Xray account operation (renew/limits/reset/lock):
@@ -1475,6 +1592,47 @@ class Handler(BaseHTTPRequestHandler):
             body = f"""<div class='card'><h3>Create Xray Account</h3><form method='post' action='/xray/create' data-stream='Create Xray Account' data-reload><label>Protocol</label><select name='protocol'><option>VMess</option><option>VLESS</option><option>Trojan</option></select><label>Remark / Name</label><input name='remark' placeholder='Remark / Name' required><label>Days</label><input name='expiry_days' type='number' min='0' value='30'><label>GB limit (0 = unlimited)</label><input name='gb_limit' type='number' min='0' value='0'><label>IP limit (0 = unlimited)</label><input name='ip_limit' type='number' min='0' value='0'>{LIMIT_HINT}<button>Create Account (UUID auto)</button></form>{RULE_NOTE}</div>
             <h3 style='margin:18px 0 10px'>Xray Accounts</h3>{cards}"""
             return self.send_html(page("Xray Accounts", body, active="/xray", user=user))
+        if p == "/openvpn":
+            users = openvpn_users()
+            def _ov_card(u):
+                nm = html.escape(str(u.get("name", "")))
+                st = "Revoked" if u.get("revoked") else display_status(u)
+                acts = ""
+                if not u.get("revoked"):
+                    acts = (f"<div style='margin-top:12px'><a class='btn ghost small' href='/openvpn/download?name={nm}'>Download .ovpn</a> "
+                            f"<form method='post' action='/openvpn/renew' style='display:inline' data-stream='Renew OpenVPN Account' data-reload><input type='hidden' name='name' value='{nm}'><input name='days' type='number' value='30' min='1' style='width:64px;display:inline-block;margin:0 4px 4px 0'><button class='small ghost'>Renew</button></form> "
+                            f"<form method='post' action='/openvpn/revoke' style='display:inline' data-stream='Revoke OpenVPN Account' data-reload><input type='hidden' name='name' value='{nm}'><button class='danger'>Revoke</button></form></div>")
+                return (f"<div class='card'><h3>🛡 {nm} {status_pill(st)}</h3>"
+                        f"<div class='kv'><div><div class='k'>Server</div><div class='v'>{html.escape(domain)} : 1194 (UDP)</div></div>"
+                        f"<div><div class='k'>Created</div><div class='v'>{html.escape(str(u.get('created','')))}</div></div>"
+                        f"<div><div class='k'>Expiry</div><div class='v'>{html.escape(str(u.get('expires','')))} ({fmt_expiry(u.get('expiry_days',30))})</div></div></div>{acts}</div>")
+            cards = "".join(_ov_card(u) for u in users) or "<div class='card'><p class='mut'>No OpenVPN accounts yet.</p></div>"
+            body = f"""<div class='card'><h3>Create OpenVPN Account</h3><form method='post' action='/openvpn/create' data-stream='Create OpenVPN Account'><label>Username</label><input name='name' placeholder='Username' required><label>Days</label><input name='expiry_days' type='number' min='1' value='30'><button>Create Account (certificate auto)</button></form><p class='mut'>Each account gets its own certificate and a ready-to-import <b>.ovpn</b> profile. Days is a literal count - it is the certificate validity. OpenVPN accounts do not take GB/IP limits in this design (those limits are enforced on SSH and Xray accounts).</p></div>
+            <h3 style='margin:18px 0 10px'>OpenVPN Accounts</h3>{cards}"""
+            return self.send_html(page("OpenVPN Accounts", body, active="/openvpn", user=user))
+        if p == "/openvpn/download":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            nm = (qs.get("name") or [""])[0]
+            import re as _re
+            prof = ""
+            _rec = next((u for u in openvpn_users() if u.get("name") == nm), None)
+            if _rec is not None and _rec.get("revoked"):
+                prof = ""  # a revoked account's profile is never served again
+            elif _re.match(r"^[A-Za-z0-9_-]{1,32}$", nm or ""):
+                try:
+                    with open(os.path.join(SUITE_CONFIG_DIR, "openvpn", "profiles", nm + ".ovpn")) as f:
+                        prof = f.read()
+                except Exception:
+                    prof = ""
+            if not prof:
+                return self.send_html(page("OpenVPN", "<div class='card'><p>No profile found for that account (it may be revoked, or the PKI is not built yet).</p><p><a class='btn ghost' href='/openvpn'>Back to OpenVPN</a></p></div>", active="/openvpn", user=user))
+            b = prof.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-openvpn-profile")
+            self.send_header("Content-Disposition", f"attachment; filename={nm}.ovpn")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers(); self.wfile.write(b)
+            return
         if p == "/services":
             role = self.session_role()
             def _svc_row(x):
@@ -1548,9 +1706,18 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/settings":
             cfg = load_config()
             designer = banner_designer_card(cfg)
+            _sd = slowdns_host(cfg); _dom = cfg.get('domain','')
+            _sd_sub = _sd[: -len(_dom) - 1] if _dom and _sd.endswith("." + _dom) else _sd
+            _pub = slowdns_pubkey()
+            _pub_html = f"<label>SlowDNS Public Key</label><div class='codebox'><pre>{html.escape(_pub)}</pre></div>" if _pub else "<p class='mut'>SlowDNS public key: not generated yet - it appears here after install / Fix Stack.</p>"
             return self.send_html(page("Settings", f"""<div class='card'><h3>Settings</h3><form method='post' action='/settings' data-stream='Settings' data-reload>
             <label>Domain</label><input name='domain' value='{html.escape(cfg.get('domain',''))}'>
             <p class='mut'>The SSH banner (the server message clients see) is styled in the SSH Banner Designer below.</p>
+            <label>SlowDNS Domain (NS host)</label><input name='slowdns_domain' value='{html.escape(_sd)}' placeholder='dns.yourdomain.com'>
+            <p class='mut'>SlowDNS needs ONE record at your DNS provider: an <b>NS record</b> for the host <b>{html.escape(_sd_sub)}</b> (full host: {html.escape(_sd)}) pointing to <b>{html.escape(_dom)}</b>. Clients then use this NS host with their SSH username + password. Changing it restarts the SlowDNS service.</p>
+            {_pub_html}
+            <label>UDP Domain (ZiVPN UDP)</label><input name='udp_domain' value='{html.escape(udp_host(cfg))}' placeholder='yourdomain.com'>
+            <p class='mut'>The host shown for the ZiVPN UDP service on account cards. Clients connect with their SSH password (UDP 5667, app ports 6000-19999).</p>
             <label>Ping QoS Interface</label><input name='qos_interface' value='{html.escape(cfg.get('qos_interface','eth0'))}'>
             <label>QoS Rate</label><input name='qos_rate' value='{html.escape(cfg.get('qos_rate','950mbit'))}'>
             <label>Per-client cap (Mbps, 0 = no cap)</label><input name='per_client_cap' value='{html.escape(str(cfg.get('per_client_cap','0')))}'>
@@ -1647,6 +1814,8 @@ class Handler(BaseHTTPRequestHandler):
                     emit("[WARN] The system user could not be created - the Activity log has the details.")
                 emit("[INFO] Looking up the server location...")
                 _loc = server_location()
+                emit("[INFO] Syncing the ZiVPN UDP password list...")
+                zivpn_sync(emit=emit)
                 emit(f"[OK] SSH account '{uname}' created - expires {exp_date}")
                 result(ssh_result_cards(uname, pwd, domain, created, exp, exp_date, gb, ipl, _loc))
                 return
@@ -1655,6 +1824,7 @@ class Handler(BaseHTTPRequestHandler):
             save_json("ssh_users.json", users); log_activity(f"ssh create {uname}")
             # When running as root, also create the real tunnel-only system user so the account can log in.
             system_user_create(uname, pwd, exp_date)
+            zivpn_sync()
             _loc = server_location()
             body = ssh_result_cards(uname, pwd, domain, created, exp, exp_date, gb, ipl, _loc)
             return self.send_html(page("SSH Account Created", body, active="/ssh", user=user))
@@ -1668,11 +1838,13 @@ class Handler(BaseHTTPRequestHandler):
                 if uname:
                     emit("[INFO] Removing the system user...")
                     system_user_delete(uname)
+                zivpn_sync()
                 emit(f"[OK] SSH account '{uname}' deleted")
                 emit("[OK] Done - close this popup to refresh the list.")
                 return
             users = [u for u in load_json("ssh_users.json", []) if u["username"] != uname]; save_json("ssh_users.json", users); log_activity(f"ssh delete {uname}")
             if uname: system_user_delete(uname)
+            zivpn_sync()
             return self.redirect("/ssh")
         if p in ("/ssh/renew", "/ssh/limits", "/ssh/reset", "/ssh/lock"):
             if self.wants_popup():
@@ -1701,7 +1873,116 @@ class Handler(BaseHTTPRequestHandler):
                 system_user_lock(uname, locked)
                 log_activity(f"ssh {'lock' if locked else 'unlock'} {uname}")
             save_json("ssh_users.json", users)
+            zivpn_sync()
             return self.redirect("/ssh")
+        if p == "/openvpn/create":
+            import re as _re
+            nm = data.get("name", "").strip()
+            exp = to_int(data.get("expiry_days", 30), 30)
+            if exp < 1: exp = 30
+            created = time.strftime("%Y-%m-%d")
+            exp_date = expires_on(created, exp)
+            script = openvpn_script()
+            def _profile_text():
+                try:
+                    with open(os.path.join(SUITE_CONFIG_DIR, "openvpn", "profiles", nm + ".ovpn")) as f:
+                        return f.read()
+                except Exception:
+                    return ""
+            def _save_record():
+                users = openvpn_users()
+                users.append({"name": nm, "created": created, "expiry_days": exp, "expires": exp_date})
+                save_json("openvpn_users.json", users)
+                log_activity(f"openvpn create {nm}")
+            if self.wants_popup():
+                emit, result = self.stream_open()
+                emit("[INFO] Creating OpenVPN account...")
+                if not _re.match(r"^[A-Za-z0-9_-]{1,32}$", nm or ""):
+                    emit("[ERROR] Invalid username (letters, digits, - and _ only, max 32) - nothing was created.")
+                    return
+                if any(u.get("name") == nm and not u.get("revoked") for u in openvpn_users()):
+                    emit(f"[ERROR] An OpenVPN account named '{nm}' already exists - nothing was created.")
+                    return
+                if not script:
+                    emit("[ERROR] openvpn-user.sh was not found - run update / Fix Stack first. Nothing was created.")
+                    return
+                emit(f"[OK] Details accepted - user '{nm}', certificate valid {exp} day(s)")
+                emit("[INFO] Issuing the certificate and building the profile...")
+                rc = _pipe_lines(["bash", script, "add", nm, str(exp)], emit)
+                if rc != 0:
+                    emit("[ERROR] Certificate issue failed - see the lines above. Nothing was saved.")
+                    return
+                _save_record()
+                emit(f"[OK] OpenVPN account '{nm}' created - certificate expires {exp_date}")
+                result(openvpn_result_card(nm, exp, exp_date, domain, _profile_text()))
+                return
+            if not _re.match(r"^[A-Za-z0-9_-]{1,32}$", nm or ""):
+                return self.redirect("/openvpn")
+            if script:
+                r = subprocess.run(["bash", script, "add", nm, str(exp)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=120)
+                if r.returncode == 0:
+                    _save_record()
+                    return self.send_html(page("OpenVPN Account Created", openvpn_result_card(nm, exp, exp_date, domain, _profile_text()), active="/openvpn", user=user))
+            return self.redirect("/openvpn")
+        if p in ("/openvpn/renew", "/openvpn/revoke"):
+            import re as _re
+            nm = data.get("name", "").strip()
+            script = openvpn_script()
+            users = openvpn_users()
+            rec = next((u for u in users if u.get("name") == nm and not u.get("revoked")), None)
+            if self.wants_popup():
+                emit, _result = self.stream_open()
+                if rec is None or not _re.match(r"^[A-Za-z0-9_-]{1,32}$", nm or ""):
+                    emit(f"[ERROR] OpenVPN account '{nm}' was not found - nothing was changed.")
+                    return
+                if not script:
+                    emit("[ERROR] openvpn-user.sh was not found - run update / Fix Stack first.")
+                    return
+                if p == "/openvpn/renew":
+                    days = to_int(data.get("days", 30), 30)
+                    if days < 1: days = 30
+                    emit(f"[INFO] Renewing the certificate of '{nm}' ({days} day(s) from today)...")
+                    rc = _pipe_lines(["bash", script, "renew", nm, str(days)], emit)
+                    if rc != 0:
+                        emit("[ERROR] Renew failed - see the lines above.")
+                        return
+                    rec["expiry_days"] = days
+                    rec["expires"] = expires_on(time.strftime("%Y-%m-%d"), days)
+                    save_json("openvpn_users.json", users); log_activity(f"openvpn renew {nm} {days}d -> {rec['expires']}")
+                    emit(f"[OK] '{nm}' renewed - new certificate expires {rec['expires']}. Download the fresh .ovpn profile from the OpenVPN page.")
+                else:
+                    emit(f"[INFO] Revoking the certificate of '{nm}'...")
+                    rc = _pipe_lines(["bash", script, "revoke", nm], emit)
+                    if rc != 0:
+                        emit("[ERROR] Revoke failed - see the lines above.")
+                        return
+                    rec["revoked"] = True; rec["disabled"] = True
+                    save_json("openvpn_users.json", users); log_activity(f"openvpn revoke {nm}")
+                    emit("[INFO] Restarting OpenVPN so the revocation takes effect...")
+                    try:
+                        subprocess.run(["systemctl", "restart", "vps-openvpn"], timeout=20, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        emit("[OK] OpenVPN restarted - the revoked certificate is now refused.")
+                    except Exception:
+                        emit("[WARN] Could not restart OpenVPN from the panel - restart the vps-openvpn service to apply the revocation.")
+                emit("[OK] Done - close this popup to refresh the list.")
+                return
+            if rec is not None and script:
+                if p == "/openvpn/renew":
+                    days = to_int(data.get("days", 30), 30)
+                    if days < 1: days = 30
+                    r = subprocess.run(["bash", script, "renew", nm, str(days)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=120)
+                    if r.returncode == 0:
+                        rec["expiry_days"] = days
+                        rec["expires"] = expires_on(time.strftime("%Y-%m-%d"), days)
+                        save_json("openvpn_users.json", users); log_activity(f"openvpn renew {nm} {days}d -> {rec['expires']}")
+                else:
+                    r = subprocess.run(["bash", script, "revoke", nm], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=120)
+                    if r.returncode == 0:
+                        rec["revoked"] = True; rec["disabled"] = True
+                        save_json("openvpn_users.json", users); log_activity(f"openvpn revoke {nm}")
+                        try: subprocess.run(["systemctl", "restart", "vps-openvpn"], timeout=20, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        except Exception: pass
+            return self.redirect("/openvpn")
         if p == "/xray/create":
             proto = data.get("protocol", "VLESS").lower(); remark = data.get("remark", "user")
             exp = to_int(data.get("expiry_days", 30), 30); gb = to_int(data.get("gb_limit", 0), 0); ipl = to_int(data.get("ip_limit", 0), 0)
@@ -1894,8 +2175,14 @@ class Handler(BaseHTTPRequestHandler):
                 emit, _result = self.stream_open()
                 emit("[INFO] Saving settings...")
                 old_domain = cfg.get("domain", "")
-                cfg.update({k: data.get(k, cfg.get(k, "")) for k in ("domain", "banner", "qos_interface", "qos_rate", "per_client_cap")}); save_config(cfg); log_activity("settings saved")
+                cfg.update({k: data.get(k, cfg.get(k, "")) for k in ("domain", "banner", "qos_interface", "qos_rate", "per_client_cap")})
+                sd_changed, sd_notes = apply_protocol_domains(cfg, data)
+                save_config(cfg); log_activity("settings saved")
                 emit("[OK] Settings saved")
+                for _n in sd_notes: emit(_n)
+                if sd_changed:
+                    emit("[INFO] SlowDNS Domain changed - restarting the SlowDNS service...")
+                    restart_slowdns(emit=emit)
                 new_domain = cfg.get("domain", "")
                 if new_domain and new_domain != old_domain:
                     sd = suite_script("set-domain.sh")
@@ -1909,7 +2196,10 @@ class Handler(BaseHTTPRequestHandler):
                 emit("[OK] Done - close this popup to refresh the page.")
                 return
             old_domain = cfg.get("domain", "")
-            cfg.update({k: data.get(k, cfg.get(k, "")) for k in ("domain", "banner", "qos_interface", "qos_rate", "per_client_cap")}); save_config(cfg); log_activity("settings saved")
+            cfg.update({k: data.get(k, cfg.get(k, "")) for k in ("domain", "banner", "qos_interface", "qos_rate", "per_client_cap")})
+            sd_changed, _sd_notes = apply_protocol_domains(cfg, data)
+            save_config(cfg); log_activity("settings saved")
+            if sd_changed: restart_slowdns()
             new_domain = cfg.get("domain", "")
             if new_domain and new_domain != old_domain:
                 sd = suite_script("set-domain.sh")
