@@ -217,8 +217,15 @@ WantedBy=multi-user.target
 EOF
   ok "vps-bot.service created (was missing)"
 fi
+# Extra protocols: create/heal the SlowDNS, ZiVPN UDP and OpenVPN setup
+# (binaries, keys/certs, configs, units, firewall rules) and re-sync the
+# ZiVPN password list from the SSH accounts.
+if declare -F ensure_protocols >/dev/null 2>&1; then
+  info "Checking the extra protocols (SlowDNS / ZiVPN UDP / OpenVPN)..."
+  ensure_protocols
+fi
 systemctl daemon-reload 2>/dev/null || true
-for svc in nginx haproxy xray dropbear ws-proxy vps-panel vps-monitor; do
+for svc in nginx haproxy xray dropbear ws-proxy vps-panel vps-monitor vps-slowdns vps-zivpn vps-openvpn; do
   if command -v systemctl >/dev/null 2>&1; then systemctl restart "$svc" 2>/dev/null && ok "$svc restarted" || warn "$svc restart skipped/failed"; fi
 done
 print_ports
@@ -233,7 +240,7 @@ svc_state(){
 echo "$BOX_EDGE"
 box_title "SERVICE STATUS"
 echo "$BOX_EDGE"
-for svc in nginx haproxy xray dropbear ws-proxy vps-panel vps-monitor vps-bot; do
+for svc in nginx haproxy xray dropbear ws-proxy vps-panel vps-monitor vps-bot vps-slowdns vps-zivpn vps-openvpn; do
   box_line "$svc : $(svc_state "$svc")"
 done
 _xray_state="$(svc_state xray)"
