@@ -104,6 +104,36 @@ vpsmenu
 - **Activity / Audit Log** — every action with the admin name and the source IP
 - **Settings** — change domain (full re-provisioning, streamed live), SSL tools, SSH banner (HTML, max 2000 bytes), Ping QoS with per-user caps, panel password change
 
+## 🧩 Config Manager
+
+The **Config Manager** page in the panel manages ready-to-import connection
+profiles for your own nodes (for example separate US / UK / DE servers):
+
+- **First-party profiles only.** A profile's domain must be the server's
+  configured domain, a subdomain of it, or the configured SlowDNS / UDP
+  host. Any other hostname is rejected by the panel and by the sync
+  script. The SNI of a profile is always its own domain — there is no
+  free SNI field.
+- **Protocols:** SSH TLS, VMess, VLESS, Trojan, OpenVPN, SlowDNS, each
+  with its normal port (443 / 443 / 443 / 443 / 1194 / 53). For SSH TLS
+  the payload is generated with `Host` set to the profile domain.
+- **Locked Config export.** Each profile can be exported as a base64
+  code (with a QR code) that clients import directly. "Locked" means the
+  profile carries no editable raw host field beyond your own domain.
+  Base64 is an encoding, not encryption — share the code like a password.
+- **API.** `GET /api/configs` returns the active profiles as JSON. It
+  requires the `X-Config-Token` header; the token is shown (and can be
+  regenerated) on the Config Manager page. Requests without the token
+  get `401`.
+- **Sync.** Saving a profile runs `scripts/config-sync.sh`, which
+  re-renders the HAProxy SNI map (`/etc/vps-manager/sni.map`) and the
+  nginx profile map, and — only when a map changed — validates the live
+  HAProxy config with `haproxy -c` and reloads HAProxy gracefully, so
+  established connections are not dropped. The panel-triggered sync is
+  the normal mechanism; if you also want a periodic safety net, one
+  optional cron line is enough:
+  `* * * * * root VPSMGR_NO_RELOAD=0 bash /opt/vps-manager-suite/scripts/config-sync.sh >/dev/null 2>&1`
+
 ## 🤖 Telegram Bot
 
 The bot is a complete remote panel, not just a status checker:

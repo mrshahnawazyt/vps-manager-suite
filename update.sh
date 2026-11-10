@@ -58,7 +58,7 @@ mkdir -p "$TMP/src"
 tar -xzf "$TGZ" --strip-components=1 -C "$TMP/src" || fail "Failed to extract the tarball."
 
 # ---- 1) VERIFY the new tree before touching the installed one -------------
-for f in install.sh menu.sh update.sh web/panel.py lib/common.sh scripts/vpsm.py; do
+for f in install.sh menu.sh update.sh web/panel.py lib/common.sh scripts/vpsm.py scripts/config-sync.py scripts/config-sync.sh; do
   [[ -f "$TMP/src/$f" ]] || fail "Required file missing from the tarball: $f - update stopped, the existing suite is safe."
 done
 echo "[update] Verifying shell syntax (bash -n)..."
@@ -93,6 +93,13 @@ fi
 mkdir -p "$SUITE_DIR"
 cp -a "$TMP/src/." "$SUITE_DIR/"
 chmod +x "$SUITE_DIR"/*.sh "$SUITE_DIR"/scripts/*.sh 2>/dev/null || true
+
+# Config Manager maps: create the (empty) map files so they always exist
+# before HAProxy starts; scripts/config-sync.py fills them from the panel's
+# profiles. An install that predates the Config Manager gains them here.
+mkdir -p /etc/vps-manager 2>/dev/null || true
+[[ -f /etc/vps-manager/sni.map ]] || : > /etc/vps-manager/sni.map 2>/dev/null || true
+[[ -f /etc/vps-manager/nginx-profile-map.conf ]] || : > /etc/vps-manager/nginx-profile-map.conf 2>/dev/null || true
 
 # Refresh the installed copies of the panel / ws-proxy
 install -m 755 "$SUITE_DIR/web/panel.py" /usr/local/bin/vps-panel.py

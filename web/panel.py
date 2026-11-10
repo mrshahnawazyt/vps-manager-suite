@@ -127,6 +127,115 @@ def sync_xray(emit=None):
     except Exception: pass
 def save_config(c): save_json("config.json", c)
 
+# --- Config Manager (first-party profiles only) ------------------------------
+# Profiles connect clients to THIS server's own nodes. A profile domain is
+# accepted only when it is the configured domain, a subdomain of it, or the
+# configured SlowDNS / UDP host. Third-party hostnames are rejected here and
+# again in scripts/config-sync.py, so a profile can never point clients at
+# someone else's host. The SNI of a profile is always its own domain - there
+# is no free SNI field anywhere in this module.
+CONFIG_PROTOCOLS = ("ssh-tls", "vmess", "vless", "trojan", "openvpn", "slowdns")
+CONFIG_DEFAULT_PORTS = {"ssh-tls": 443, "vmess": 443, "vless": 443,
+                        "trojan": 443, "openvpn": 1194, "slowdns": 53}
+# Ports that must never be handed to a client as a profile endpoint: the
+# panel itself (9090) and the loopback/internal stack ports (mirrors the
+# internal part of the RESERVED set in scripts/panel-admin.sh; the stack's
+# public service ports - 443, 1194, 53 - are the legitimate endpoints).
+CONFIG_BLOCKED_PORTS = {9090, 10085, 10443, 10444, 10445, 18080}
+
+def config_owned_domains(cfg=None):
+    cfg = cfg if cfg is not None else load_config()
+    out = []
+    for cand in (cfg.get("domain"), slowdns_host(cfg), udp_host(cfg)):
+        v = str(cand or "").strip().rstrip(".").lower()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+def config_is_owned(host, cfg=None):
+    """Owned = the configured domain itself, any subdomain of it, or the
+    configured SlowDNS / UDP host. 'domain.evil.com' style suffix tricks
+    and look-alike parents never match."""
+    h = str(host or "").strip().rstrip(".").lower()
+    if not h or not valid_hostname(h):
+        return False
+    for base in config_owned_domains(cfg):
+        if h == base or h.endswith("." + base):
+            return True
+    return False
+
+def config_payload(domain):
+    return f"GET /sshws HTTP/1.1[crlf]Host: {domain}[crlf]Upgrade: websocket[crlf][crlf]"
+
+def config_validate(data, cfg=None):
+    """Validate profile form/API data -> (clean, None) or (None, error)."""
+    cfg = cfg if cfg is not None else load_config()
+    name = str(data.get("name") or "").strip()
+    if not (1 <= len(name) <= 60):
+        return None, "Profile name must be 1-60 characters."
+    proto = str(data.get("protocol") or "").strip().lower()
+    if proto not in CONFIG_PROTOCOLS:
+        return None, "Unknown protocol."
+    domain = str(data.get("domain") or "").strip().rstrip(".").lower()
+    if not config_is_owned(domain, cfg):
+        return None, (f"Domain '{domain or '(blank)'}' is not one of this server's own domains. "
+                      "Only the configured domain, its subdomains and the SlowDNS / UDP hosts are allowed.")
+    port = to_int(data.get("port", CONFIG_DEFAULT_PORTS[proto]), -1)
+    if not (1 <= port <= 65535):
+        return None, "Port must be a number between 1 and 65535."
+    if port in CONFIG_BLOCKED_PORTS:
+        return None, f"Port {port} is an internal/panel port and cannot be a client endpoint."
+    clean = {"name": name, "protocol": proto, "domain": domain, "port": port,
+             "sni": domain, "active": bool(data.get("active"))}
+    if proto == "ssh-tls":
+        clean["payload"] = config_payload(domain)
+    return clean, None
+
+def load_profiles():
+    rows = load_json("config-profiles.json", [])
+    return rows if isinstance(rows, list) else []
+
+def save_profiles(rows): save_json("config-profiles.json", rows)
+
+def config_public(p):
+    """The public shape of one profile (panel export + /api/configs):
+    first-party fields only - address and SNI are the operator's own domain."""
+    pub = {"name": p.get("name", ""), "protocol": p.get("protocol", ""),
+           "address": p.get("domain", ""), "port": to_int(p.get("port", 0)),
+           "sni": p.get("domain", "")}
+    if p.get("protocol") == "ssh-tls":
+        pub["payload"] = config_payload(p.get("domain", ""))
+    return pub
+
+def config_export_b64(p):
+    """'Locked' export: base64-encoded structured JSON. Locked means the
+    client profile carries no editable raw host field beyond the operator's
+    own domain - it is an encoding, not encryption, and the UI says so."""
+    import base64 as _b64
+    return _b64.b64encode(json.dumps(config_public(p), indent=2).encode()).decode()
+
+def ensure_config_token():
+    cfg = load_config()
+    tok = str(cfg.get("config_api_token") or "").strip()
+    if not tok:
+        tok = secrets.token_urlsafe(24)
+        cfg["config_api_token"] = tok
+        save_config(cfg)
+    return tok
+
+def run_config_sync():
+    """Best-effort: ask scripts/config-sync.sh to re-render the routing maps
+    (and gracefully reload HAProxy when it changed). Never fatal."""
+    cand = suite_script("config-sync.sh")
+    if not cand:
+        return
+    env = dict(os.environ); env["VPSMGR_DATA_DIR"] = DATA_DIR
+    try:
+        subprocess.run(["bash", cand], timeout=30, env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception:
+        pass
+
 # --- Extra protocols: SlowDNS / ZiVPN UDP / OpenVPN --------------------------
 SUITE_CONFIG_DIR = os.environ.get("VPSMGR_CONFIG_DIR", "/etc/vps-manager")
 _HOST_LABEL = __import__("re").compile(r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -965,6 +1074,7 @@ NAV_ITEMS = [
     ("/services", "Running Services", "⚙"),
     ("/stats", "VPS Stats", "📊"),
     ("/telegram", "Telegram Bot", "✈"),
+    ("/configs", "Config Manager", "🧩"),
     ("/settings", "Settings", "🛠"),
     ("/admins", "Panel Admins", "👤"),
     ("/activity", "Activity", "🕘"),
@@ -1503,6 +1613,10 @@ class Handler(BaseHTTPRequestHandler):
         if headers:
             for k, v in headers: self.send_header(k, v)
         self.end_headers(); self.wfile.write(b)
+    def send_json(self, obj, code=200):
+        b = json.dumps(obj).encode(); self.send_response(code)
+        self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b)))
+        self.end_headers(); self.wfile.write(b)
     def redirect(self, loc, code=302, headers=None):
         self.send_response(code); self.send_header("Location", loc)
         if headers:
@@ -1515,6 +1629,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = urllib.parse.urlparse(self.path).path
         self.set_ctx()
+        if p == "/api/configs":
+            # Token-guarded machine API (no panel session): active
+            # first-party profiles only, public fields only.
+            want = str(load_config().get("config_api_token") or "")
+            got = self.headers.get("X-Config-Token", "")
+            if not want or not got or not secrets.compare_digest(got, want):
+                return self.send_json({"error": "unauthorized"}, code=401)
+            profs = [config_public(x) for x in load_profiles() if x.get("active")]
+            return self.send_json({"profiles": profs})
         if p == "/login":
             body = ("<div class='logincard'>" + BRAND +
                     "<h2>Panel Login</h2><p class='sub'>Sign in to manage your VPS.</p>"
@@ -1738,6 +1861,73 @@ class Handler(BaseHTTPRequestHandler):
             <div class='card'><h3>QoS Status</h3><pre class='raw'>{html.escape(subprocess.getoutput(('bash ' + suite_script('qos.sh') + ' status') if suite_script('qos.sh') else 'echo qos.sh not found'))}</pre></div>
             <div class='card'><h3>SSL Certificate</h3><pre class='raw'>{html.escape(subprocess.getoutput(('bash ' + suite_script('ssl.sh') + ' status') if suite_script('ssl.sh') else 'echo ssl helper not found'))}</pre><form method='post' action='/action/run' style='display:inline' data-stream='Issue / Renew SSL' data-reload><input type='hidden' name='job' value='ssl'><button class='ghost'>Issue / Renew SSL</button></form></div>
             <div class='card'><h3>Change Panel Password</h3><form method='post' action='/password'><label>New password</label><input name='new_password' type='password' required placeholder='New password'><button>Change Password</button></form></div>""", active="/settings", user=user))
+        if p == "/configs":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            err = (qs.get("err") or [""])[0]
+            edit_id = (qs.get("edit") or [""])[0]
+            profiles = load_profiles()
+            editing = next((x for x in profiles if x.get("id") == edit_id), None)
+            tok = ensure_config_token()
+            owned = config_owned_domains(cfg)
+            owned_txt = ", ".join(html.escape(x) for x in owned) or "(no domain configured yet)"
+            proto_opts = "".join(
+                f"<option value='{pr}'{' selected' if editing and editing.get('protocol') == pr else ''}>{pr}</option>"
+                for pr in CONFIG_PROTOCOLS)
+            _ev = editing or {}
+            _def_port = CONFIG_DEFAULT_PORTS.get(_ev.get("protocol", "ssh-tls"), 443)
+            rows = ""
+            for x in profiles:
+                xid = html.escape(str(x.get("id", "")))
+                st = status_pill("Active" if x.get("active") else "Inactive")
+                tog = "0" if x.get("active") else "1"
+                tog_lbl = "Deactivate" if x.get("active") else "Activate"
+                rows += (f"<tr><td><b>{html.escape(str(x.get('name','')))}</b></td>"
+                         f"<td>{html.escape(str(x.get('protocol','')))}</td>"
+                         f"<td>{html.escape(str(x.get('domain','')))} : {to_int(x.get('port',0))}</td>"
+                         f"<td>{html.escape(str(x.get('domain','')))}</td><td>{st}</td>"
+                         f"<td style='min-width:260px'><a class='btn ghost small' href='/configs/export?id={xid}'>Generate Locked Config</a> "
+                         f"<a class='btn ghost small' href='/configs?edit={xid}'>Edit</a> "
+                         f"<form method='post' action='/configs/toggle' style='display:inline'><input type='hidden' name='id' value='{xid}'><input type='hidden' name='active' value='{tog}'><button class='small ghost'>{tog_lbl}</button></form> "
+                         f"<form method='post' action='/configs/delete' style='display:inline'><input type='hidden' name='id' value='{xid}'><button class='danger'>Delete</button></form></td></tr>")
+            if not rows:
+                rows = "<tr><td colspan='6' class='mut'>No profiles yet. Add the first one below.</td></tr>"
+            err_html = f"<p class='bad'>{html.escape(err)}</p>" if err else ""
+            body = f"""<div class='card'><h3>Config Manager - API Token</h3>
+            <p class='mut'>Remote clients and scripts fetch the active profiles from <code>GET /api/configs</code> with the header <code>X-Config-Token</code>. Keep this token private - anyone holding it can read the profile list.</p>
+            <div class='codebox'><button type='button' class='copybtn' onclick="copyText('cfg-token', this)">Copy</button><pre id='cfg-token'>{html.escape(tok)}</pre></div>
+            <form method='post' action='/configs/token' style='margin-top:10px'><button class='ghost'>Regenerate Token</button></form></div>
+            <div class='card'><h3>{'Edit Profile' if editing else 'Add Profile'}</h3>{err_html}
+            <form method='post' action='/configs/save'>
+            <input type='hidden' name='id' value='{html.escape(str(_ev.get('id','')))}'>
+            <label>Profile Name</label><input name='name' required maxlength='60' value='{html.escape(str(_ev.get('name','')))}' placeholder='e.g. US Node - SSH TLS'>
+            <label>Protocol</label><select name='protocol'>{proto_opts}</select>
+            <label>Domain (your own domain or a subdomain of it)</label><input name='domain' required value='{html.escape(str(_ev.get('domain','')))}' placeholder='{html.escape(domain)}'>
+            <p class='mut'>Allowed hosts: <b>{owned_txt}</b> and their subdomains. Any other hostname is rejected - profiles only ever point at this server's own nodes. The SNI is set automatically to the profile domain.</p>
+            <label>Port</label><input name='port' type='number' min='1' max='65535' value='{to_int(_ev.get('port', _def_port), _def_port)}'>
+            <label style='display:block;margin:8px 0'><input type='checkbox' name='active' value='1'{' checked' if _ev.get('active', True) else ''} style='width:auto;display:inline'> Active (included in /api/configs and the routing maps)</label>
+            <button>{'Save Profile' if editing else 'Add Profile'}</button></form>
+            <p class='mut'>Default ports: SSH TLS / VMess / VLESS / Trojan 443, OpenVPN 1194, SlowDNS 53. For SSH TLS the payload is generated for you with Host set to the profile domain.</p></div>
+            <div class='card'><h3>Profiles</h3><div class='tblwrap'><table><tr><th>Name</th><th>Protocol</th><th>Address</th><th>SNI</th><th>Status</th><th></th></tr>{rows}</table></div>
+            <p class='mut'>Saving, toggling or deleting a profile re-renders the routing maps (scripts/config-sync.sh) and reloads HAProxy gracefully when a map changed.</p></div>"""
+            return self.send_html(page("Config Manager", body, active="/configs", user=user))
+        if p == "/configs/export":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            pid = (qs.get("id") or [""])[0]
+            prof = next((x for x in load_profiles() if x.get("id") == pid), None)
+            if prof is None:
+                return self.send_html(page("Config Manager", "<div class='card'><h3>Profile not found</h3><p><a class='btn ghost' href='/configs'>Back to Config Manager</a></p></div>", active="/configs", user=user), code=404)
+            b64 = config_export_b64(prof)
+            pub = config_public(prof)
+            pretty = html.escape(json.dumps(pub, indent=2))
+            svg = qr_svg_for(b64)
+            qr_html = f"<details class='qrd' open><summary>QR code</summary><div class='qrbox'>{svg}</div></details>" if svg else "<p class='mut'>QR code unavailable for this profile (the encoded profile is too long for a QR code) - use the copyable code below instead.</p>"
+            body = f"""<div class='card'><h3>Locked Config - {html.escape(str(prof.get('name','')))}</h3>
+            <p class='mut'>Give this code (or the QR code) to the client: they import it and connect - no manual host or SNI typing. "Locked" means the profile contains no editable raw host field beyond your own domain (<b>{html.escape(str(prof.get('domain','')))}</b>). The code is <b>base64 encoding, not encryption</b> - anyone can decode it, so share it like a password.</p>
+            <div class='codebox'><button type='button' class='copybtn' onclick="copyText('cfg-export', this)">Copy</button><pre id='cfg-export'>{html.escape(b64)}</pre></div>
+            {qr_html}
+            <h3 style='margin-top:16px'>Profile contents</h3><pre class='raw'>{pretty}</pre>
+            <p><a class='btn ghost' href='/configs'>Back to Config Manager</a></p></div>"""
+            return self.send_html(page("Locked Config", body, active="/configs", user=user))
         if p == "/admins":
             creds = load_creds(); role = self.session_role()
             extras = load_admins()
@@ -2179,6 +2369,47 @@ class Handler(BaseHTTPRequestHandler):
                     return self.stream_cmd("Python Proxy - Set Port", ["echo", "[ERROR] Invalid port - enter an integer between 1 and 65535"])
                 return self.stream_cmd("Python Proxy - Set Port", ["bash", ctl, "set-port", str(int(raw))] if ctl else ["echo", "ws-proxy-ctl.sh not found - run vpsupdate first"])
             return self.redirect("/services")
+        if p == "/configs/save":
+            clean, cerr = config_validate(data, cfg)
+            if cerr:
+                return self.redirect("/configs?err=" + urllib.parse.quote(cerr))
+            profiles = load_profiles()
+            pid = str(data.get("id") or "").strip()
+            existing = next((x for x in profiles if x.get("id") == pid), None)
+            if existing is not None:
+                existing.update(clean)
+                log_activity(f"config profile updated: {clean['name']} ({clean['protocol']} {clean['domain']}:{clean['port']})")
+            else:
+                clean["id"] = uuid.uuid4().hex[:12]
+                profiles.append(clean)
+                log_activity(f"config profile added: {clean['name']} ({clean['protocol']} {clean['domain']}:{clean['port']})")
+            save_profiles(profiles)
+            run_config_sync()
+            return self.redirect("/configs")
+        if p == "/configs/toggle":
+            profiles = load_profiles()
+            rec = next((x for x in profiles if x.get("id") == str(data.get("id") or "")), None)
+            if rec is not None:
+                rec["active"] = data.get("active") == "1"
+                save_profiles(profiles)
+                log_activity(f"config profile {'activated' if rec['active'] else 'deactivated'}: {rec.get('name','')}")
+                run_config_sync()
+            return self.redirect("/configs")
+        if p == "/configs/delete":
+            profiles = load_profiles()
+            pid = str(data.get("id") or "")
+            rec = next((x for x in profiles if x.get("id") == pid), None)
+            if rec is not None:
+                profiles = [x for x in profiles if x.get("id") != pid]
+                save_profiles(profiles)
+                log_activity(f"config profile deleted: {rec.get('name','')}")
+                run_config_sync()
+            return self.redirect("/configs")
+        if p == "/configs/token":
+            cfg["config_api_token"] = secrets.token_urlsafe(24)
+            save_config(cfg)
+            log_activity("config API token regenerated")
+            return self.redirect("/configs")
         if p == "/telegram":
             cfg.update({"telegram_token": data.get("telegram_token", ""), "telegram_admin_id": data.get("telegram_admin_id", "")}); save_config(cfg); log_activity("telegram config saved"); return self.redirect("/telegram")
         if p == "/settings":

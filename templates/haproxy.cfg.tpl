@@ -54,6 +54,20 @@ frontend https_in
     mode tcp
     bind *:443 ssl crt /etc/vps-manager/ssl/haproxy.pem alpn http/1.1
     timeout client 3600s
+    # Config Manager SNI map (panel > Config Manager, rendered by
+    # scripts/config-sync.py into /etc/vps-manager/sni.map): the SNI of
+    # the TLS session terminated HERE is visible as ssl_fc_sni -
+    # req.ssl_sni sees nothing once TLS is terminated, and the dispatch
+    # frontend behind the PROXY hop cannot see the SNI at all (both
+    # measured in simulation). The map only ever names
+    # https_dispatch_in, this chain's own default entry, so a map HIT
+    # routes exactly like a MISS; with an empty map (no profiles saved)
+    # the acl never matches and routing is byte-identical to before.
+    # The map file is created empty by install / Fix Stack / update
+    # before HAProxy starts, because a missing map file fails the
+    # config check.
+    acl cm_sni_mapped ssl_fc_sni,map(/etc/vps-manager/sni.map) -m found
+    use_backend %[ssl_fc_sni,map(/etc/vps-manager/sni.map)] if cm_sni_mapped
     # TLS termination ONLY. The protocol dispatch cannot live here:
     # payload() in this frontend does not see the decrypted stream when
     # the switching decision is made (measured: the capture is empty
