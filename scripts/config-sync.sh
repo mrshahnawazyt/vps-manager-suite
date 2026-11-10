@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# VPS Manager Suite - Config Manager sync wrapper (original code)
+# VPS Manager Suite - SNI Manager sync wrapper (original code)
 #
 # Runs scripts/config-sync.py (renders the HAProxy SNI map + nginx
 # profile map from the panel's first-party profiles). When a map

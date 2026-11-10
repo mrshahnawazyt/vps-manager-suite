@@ -137,7 +137,7 @@ info "Applying the Nginx + HAProxy templates..."
 sed "s/__DOMAIN__/$DOMAIN/g; s/__PANEL_PORT__/9090/g; s/__WSPROXY_PORT__/$WS_PORT/g" "$SCRIPT_DIR/templates/nginx.conf.tpl" > /etc/nginx/nginx.conf
 sed "s/__DOMAIN__/$DOMAIN/g; s/__WSPROXY_PORT__/$WS_PORT/g; s/__WSPROXY_PROXY_PORT__/$((WS_PORT+1))/g" "$SCRIPT_DIR/templates/haproxy.cfg.tpl" > /etc/haproxy/haproxy.cfg
 nginx -t || warn "nginx config test warning"
-# Config Manager maps: create the (empty) map files before HAProxy starts,
+# SNI Manager maps: create the (empty) map files before HAProxy starts,
 # so the files the sync renders always exist. scripts/config-sync.py fills
 # them once profiles are saved in the panel; an absent/empty map must never
 # be a reason for HAProxy to fail.

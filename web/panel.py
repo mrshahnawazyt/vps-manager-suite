@@ -127,7 +127,7 @@ def sync_xray(emit=None):
     except Exception: pass
 def save_config(c): save_json("config.json", c)
 
-# --- Config Manager (first-party profiles only) ------------------------------
+# --- SNI Manager (first-party profiles only) ---------------------------------
 # Profiles connect clients to THIS server's own nodes. A profile domain is
 # accepted only when it is the configured domain, a subdomain of it, or the
 # configured SlowDNS / UDP host. Third-party hostnames are rejected here and
@@ -142,6 +142,25 @@ CONFIG_DEFAULT_PORTS = {"ssh-tls": 443, "vmess": 443, "vless": 443,
 # internal part of the RESERVED set in scripts/panel-admin.sh; the stack's
 # public service ports - 443, 1194, 53 - are the legitimate endpoints).
 CONFIG_BLOCKED_PORTS = {9090, 10085, 10443, 10444, 10445, 18080}
+# Display order / labels for the SNI Manager form (internal values unchanged).
+CONFIG_PROTOCOL_ORDER = ("vless", "vmess", "trojan", "ssh-tls", "openvpn", "slowdns")
+CONFIG_PROTOCOL_LABELS = {"vless": "VLESS", "vmess": "VMess", "trojan": "Trojan",
+                          "ssh-tls": "SSH", "openvpn": "OpenVPN", "slowdns": "SlowDNS"}
+# The only connection paths that exist on this stack, per protocol (the
+# nginx router locations). OpenVPN / SlowDNS have no HTTP path at all.
+CONFIG_PATHS = {"ssh-tls": ("/sshws",), "vmess": ("/vmess",),
+                "vless": ("/vless",), "trojan": ("/trojan",),
+                "openvpn": (), "slowdns": ()}
+
+def config_profile_path(proto, path=None):
+    """The connection path of a profile: only the stack's real endpoint
+    for the protocol is ever used - a stored/submitted value that is not
+    one of them (or a profile saved before paths existed) falls back to
+    that default. OpenVPN / SlowDNS profiles carry an empty path."""
+    valid = CONFIG_PATHS.get(str(proto or ""), ())
+    if path and str(path) in valid:
+        return str(path)
+    return valid[0] if valid else ""
 
 def config_owned_domains(cfg=None):
     cfg = cfg if cfg is not None else load_config()
@@ -186,7 +205,8 @@ def config_validate(data, cfg=None):
     if port in CONFIG_BLOCKED_PORTS:
         return None, f"Port {port} is an internal/panel port and cannot be a client endpoint."
     clean = {"name": name, "protocol": proto, "domain": domain, "port": port,
-             "sni": domain, "active": bool(data.get("active"))}
+             "sni": domain, "path": config_profile_path(proto, data.get("path")),
+             "active": bool(data.get("active"))}
     if proto == "ssh-tls":
         clean["payload"] = config_payload(domain)
     return clean, None
@@ -202,7 +222,8 @@ def config_public(p):
     first-party fields only - address and SNI are the operator's own domain."""
     pub = {"name": p.get("name", ""), "protocol": p.get("protocol", ""),
            "address": p.get("domain", ""), "port": to_int(p.get("port", 0)),
-           "sni": p.get("domain", "")}
+           "sni": p.get("domain", ""),
+           "path": config_profile_path(p.get("protocol", ""), p.get("path"))}
     if p.get("protocol") == "ssh-tls":
         pub["payload"] = config_payload(p.get("domain", ""))
     return pub
@@ -1074,7 +1095,7 @@ NAV_ITEMS = [
     ("/services", "Running Services", "⚙"),
     ("/stats", "VPS Stats", "📊"),
     ("/telegram", "Telegram Bot", "✈"),
-    ("/configs", "Config Manager", "🧩"),
+    ("/configs", "SNI Manager", "🧩"),
     ("/settings", "Settings", "🛠"),
     ("/admins", "Panel Admins", "👤"),
     ("/activity", "Activity", "🕘"),
@@ -1861,61 +1882,115 @@ class Handler(BaseHTTPRequestHandler):
             <div class='card'><h3>QoS Status</h3><pre class='raw'>{html.escape(subprocess.getoutput(('bash ' + suite_script('qos.sh') + ' status') if suite_script('qos.sh') else 'echo qos.sh not found'))}</pre></div>
             <div class='card'><h3>SSL Certificate</h3><pre class='raw'>{html.escape(subprocess.getoutput(('bash ' + suite_script('ssl.sh') + ' status') if suite_script('ssl.sh') else 'echo ssl helper not found'))}</pre><form method='post' action='/action/run' style='display:inline' data-stream='Issue / Renew SSL' data-reload><input type='hidden' name='job' value='ssl'><button class='ghost'>Issue / Renew SSL</button></form></div>
             <div class='card'><h3>Change Panel Password</h3><form method='post' action='/password'><label>New password</label><input name='new_password' type='password' required placeholder='New password'><button>Change Password</button></form></div>""", active="/settings", user=user))
-        if p == "/configs":
+        if p in ("/configs", "/sni-manager"):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             err = (qs.get("err") or [""])[0]
             edit_id = (qs.get("edit") or [""])[0]
+            saved_id = (qs.get("saved") or [""])[0]
             profiles = load_profiles()
             editing = next((x for x in profiles if x.get("id") == edit_id), None)
+            saved_prof = next((x for x in profiles if x.get("id") == saved_id), None)
             tok = ensure_config_token()
             owned = config_owned_domains(cfg)
             owned_txt = ", ".join(html.escape(x) for x in owned) or "(no domain configured yet)"
-            proto_opts = "".join(
-                f"<option value='{pr}'{' selected' if editing and editing.get('protocol') == pr else ''}>{pr}</option>"
-                for pr in CONFIG_PROTOCOLS)
             _ev = editing or {}
-            _def_port = CONFIG_DEFAULT_PORTS.get(_ev.get("protocol", "ssh-tls"), 443)
+            _ev_proto = str(_ev.get("protocol", "vless"))
+            proto_opts = "".join(
+                f"<option value='{pr}'{' selected' if _ev_proto == pr else ''}>{CONFIG_PROTOCOL_LABELS[pr]}</option>"
+                for pr in CONFIG_PROTOCOL_ORDER)
+            _def_port = CONFIG_DEFAULT_PORTS.get(_ev_proto, 443)
+            _ev_domain = str(_ev.get("domain") or domain)
+            _ev_path = config_profile_path(_ev_proto, _ev.get("path"))
+            _ev_paths = CONFIG_PATHS.get(_ev_proto, ())
+            if _ev_paths:
+                path_opts = "".join(
+                    f"<option value='{pp}'{' selected' if _ev_path == pp else ''}>{pp}</option>"
+                    for pp in _ev_paths)
+                path_sel = f"<select name='path' id='sni-path'>{path_opts}</select>"
+            else:
+                path_sel = "<select name='path' id='sni-path' disabled><option value=''>&mdash;</option></select>"
+            _paths_js = json.dumps({k: list(v) for k, v in CONFIG_PATHS.items()})
+            _ports_js = json.dumps(CONFIG_DEFAULT_PORTS)
             rows = ""
             for x in profiles:
                 xid = html.escape(str(x.get("id", "")))
-                st = status_pill("Active" if x.get("active") else "Inactive")
+                st = status_pill("Active" if x.get("active") else "Off")
                 tog = "0" if x.get("active") else "1"
                 tog_lbl = "Deactivate" if x.get("active") else "Activate"
+                xb64 = config_export_b64(x)
                 rows += (f"<tr><td><b>{html.escape(str(x.get('name','')))}</b></td>"
-                         f"<td>{html.escape(str(x.get('protocol','')))}</td>"
-                         f"<td>{html.escape(str(x.get('domain','')))} : {to_int(x.get('port',0))}</td>"
-                         f"<td>{html.escape(str(x.get('domain','')))}</td><td>{st}</td>"
-                         f"<td style='min-width:260px'><a class='btn ghost small' href='/configs/export?id={xid}'>Generate Locked Config</a> "
+                         f"<td>{html.escape(CONFIG_PROTOCOL_LABELS.get(str(x.get('protocol','')), str(x.get('protocol',''))))}</td>"
+                         f"<td>{html.escape(str(x.get('domain','')))}</td>"
+                         f"<td>{html.escape(str(x.get('domain','')))}</td>"
+                         f"<td>{to_int(x.get('port',0))}</td><td>{st}</td>"
+                         f"<td style='min-width:300px'><button type='button' class='small' onclick=\"copyText('cfg-b64-{xid}', this)\">Copy Config</button> "
+                         f"<pre id='cfg-b64-{xid}' style='display:none'>{html.escape(xb64)}</pre> "
+                         f"<a class='btn ghost small' href='/configs/export?id={xid}'>QR / Export</a> "
                          f"<a class='btn ghost small' href='/configs?edit={xid}'>Edit</a> "
                          f"<form method='post' action='/configs/toggle' style='display:inline'><input type='hidden' name='id' value='{xid}'><input type='hidden' name='active' value='{tog}'><button class='small ghost'>{tog_lbl}</button></form> "
                          f"<form method='post' action='/configs/delete' style='display:inline'><input type='hidden' name='id' value='{xid}'><button class='danger'>Delete</button></form></td></tr>")
             if not rows:
-                rows = "<tr><td colspan='6' class='mut'>No profiles yet. Add the first one below.</td></tr>"
+                rows = "<tr><td colspan='7' class='mut'>No SNI routes yet. Add the first one above.</td></tr>"
             err_html = f"<p class='bad'>{html.escape(err)}</p>" if err else ""
-            body = f"""<div class='card'><h3>Config Manager - API Token</h3>
+            saved_html = ""
+            if saved_prof is not None:
+                sb64 = config_export_b64(saved_prof)
+                spub = config_public(saved_prof)
+                ssvg = qr_svg_for(sb64)
+                sqr = f"<details class='qrd' open><summary>QR code</summary><div class='qrbox'>{ssvg}</div></details>" if ssvg else "<p class='mut'>QR code unavailable for this profile (the encoded profile is too long for a QR code) - use the copyable code below instead.</p>"
+                saved_html = f"""<div class='card'><h3>Client Config - {html.escape(str(saved_prof.get('name','')))}</h3>
+            <p class='mut'>Saved. Give this code (or the QR code) to the client: they import it and connect - no manual host or SNI typing. "Locked" means the profile contains no editable raw host field beyond your own domain (<b>{html.escape(str(saved_prof.get('domain','')))}</b>). The code is <b>base64 encoding, not encryption</b> - anyone can decode it, so share it like a password.</p>
+            <div class='codebox'><button type='button' class='copybtn' onclick="copyText('cfg-saved', this)">Copy</button><pre id='cfg-saved'>{html.escape(sb64)}</pre></div>
+            {sqr}
+            <h3 style='margin-top:16px'>Profile contents</h3><pre class='raw'>{html.escape(json.dumps(spub, indent=2))}</pre></div>
+            """
+            body = f"""<div class='card'><h3>{'Edit SNI Route' if editing else 'Add New SNI Route'}</h3>{err_html}
+            <form method='post' action='/configs/save'>
+            <input type='hidden' name='id' value='{html.escape(str(_ev.get('id','')))}'>
+            <label>Profile Name</label><input name='name' required maxlength='60' value='{html.escape(str(_ev.get('name','')))}' placeholder='Fast Route 1'>
+            <label>Protocol</label><select name='protocol' id='sni-proto'>{proto_opts}</select>
+            <label>Target VPS Domain / IP</label><input name='domain' id='sni-domain' required value='{html.escape(_ev_domain)}' placeholder='{html.escape(domain)}'>
+            <p class='mut'>Allowed hosts: <b>{owned_txt}</b> and their subdomains. Any other hostname is rejected - profiles only ever point at this server's own nodes.</p>
+            <label>Port</label><input name='port' id='sni-port' type='number' min='1' max='65535' value='{to_int(_ev.get('port', _def_port), _def_port)}'>
+            <label>SNI</label><input id='sni-mirror' value='{html.escape(_ev_domain)}' readonly disabled>
+            <p class='mut'>SNI is locked to your own domain.</p>
+            <label>Path</label>{path_sel}
+            <label style='display:block;margin:8px 0'><input type='checkbox' name='active' value='1'{' checked' if _ev.get('active', True) else ''} style='width:auto;display:inline'> Active (included in /api/configs and the routing maps)</label>
+            <button>Save & Generate Client Config</button></form>
+            <p class='mut'>Default ports: VLESS / VMess / Trojan / SSH 443, OpenVPN 1194, SlowDNS 53. For SSH the payload is generated for you with Host set to the profile domain, and the path is the protocol's real endpoint on this stack.</p></div>
+            {saved_html}<div class='card'><h3>Saved SNI Routes</h3><div class='tblwrap'><table><tr><th>Name</th><th>Protocol</th><th>VPS Domain</th><th>SNI</th><th>Port</th><th>Status</th><th>Action</th></tr>{rows}</table></div>
+            <p class='mut'>Saving, toggling or deleting a route re-renders the routing maps (scripts/config-sync.sh) and reloads HAProxy gracefully when a map changed.</p></div>
+            <div class='card'><h3>SNI Manager - API Token</h3>
             <p class='mut'>Remote clients and scripts fetch the active profiles from <code>GET /api/configs</code> with the header <code>X-Config-Token</code>. Keep this token private - anyone holding it can read the profile list.</p>
             <div class='codebox'><button type='button' class='copybtn' onclick="copyText('cfg-token', this)">Copy</button><pre id='cfg-token'>{html.escape(tok)}</pre></div>
             <form method='post' action='/configs/token' style='margin-top:10px'><button class='ghost'>Regenerate Token</button></form></div>
-            <div class='card'><h3>{'Edit Profile' if editing else 'Add Profile'}</h3>{err_html}
-            <form method='post' action='/configs/save'>
-            <input type='hidden' name='id' value='{html.escape(str(_ev.get('id','')))}'>
-            <label>Profile Name</label><input name='name' required maxlength='60' value='{html.escape(str(_ev.get('name','')))}' placeholder='e.g. US Node - SSH TLS'>
-            <label>Protocol</label><select name='protocol'>{proto_opts}</select>
-            <label>Domain (your own domain or a subdomain of it)</label><input name='domain' required value='{html.escape(str(_ev.get('domain','')))}' placeholder='{html.escape(domain)}'>
-            <p class='mut'>Allowed hosts: <b>{owned_txt}</b> and their subdomains. Any other hostname is rejected - profiles only ever point at this server's own nodes. The SNI is set automatically to the profile domain.</p>
-            <label>Port</label><input name='port' type='number' min='1' max='65535' value='{to_int(_ev.get('port', _def_port), _def_port)}'>
-            <label style='display:block;margin:8px 0'><input type='checkbox' name='active' value='1'{' checked' if _ev.get('active', True) else ''} style='width:auto;display:inline'> Active (included in /api/configs and the routing maps)</label>
-            <button>{'Save Profile' if editing else 'Add Profile'}</button></form>
-            <p class='mut'>Default ports: SSH TLS / VMess / VLESS / Trojan 443, OpenVPN 1194, SlowDNS 53. For SSH TLS the payload is generated for you with Host set to the profile domain.</p></div>
-            <div class='card'><h3>Profiles</h3><div class='tblwrap'><table><tr><th>Name</th><th>Protocol</th><th>Address</th><th>SNI</th><th>Status</th><th></th></tr>{rows}</table></div>
-            <p class='mut'>Saving, toggling or deleting a profile re-renders the routing maps (scripts/config-sync.sh) and reloads HAProxy gracefully when a map changed.</p></div>"""
-            return self.send_html(page("Config Manager", body, active="/configs", user=user))
+            <script>
+            (function(){{
+              var paths={_paths_js}, ports={_ports_js};
+              var proto=document.getElementById('sni-proto'), dom=document.getElementById('sni-domain'),
+                  mir=document.getElementById('sni-mirror'), port=document.getElementById('sni-port'),
+                  path=document.getElementById('sni-path');
+              if(!proto||!dom) return;
+              dom.addEventListener('input', function(){{ if(mir) mir.value=dom.value; }});
+              proto.addEventListener('change', function(){{
+                var p=proto.value;
+                if(port && ports[p]) port.value=ports[p];
+                if(path){{
+                  var opts=paths[p]||[];
+                  path.innerHTML='';
+                  if(!opts.length){{ path.disabled=true; var o=document.createElement('option'); o.value=''; o.textContent='—'; path.appendChild(o); }}
+                  else {{ path.disabled=false; for(var i=0;i<opts.length;i++){{ var o2=document.createElement('option'); o2.value=opts[i]; o2.textContent=opts[i]; path.appendChild(o2); }} }}
+                }}
+              }});
+            }})();
+            </script>"""
+            return self.send_html(page("SNI Manager", body, active="/configs", user=user))
         if p == "/configs/export":
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             pid = (qs.get("id") or [""])[0]
             prof = next((x for x in load_profiles() if x.get("id") == pid), None)
             if prof is None:
-                return self.send_html(page("Config Manager", "<div class='card'><h3>Profile not found</h3><p><a class='btn ghost' href='/configs'>Back to Config Manager</a></p></div>", active="/configs", user=user), code=404)
+                return self.send_html(page("SNI Manager", "<div class='card'><h3>Profile not found</h3><p><a class='btn ghost' href='/configs'>Back to SNI Manager</a></p></div>", active="/configs", user=user), code=404)
             b64 = config_export_b64(prof)
             pub = config_public(prof)
             pretty = html.escape(json.dumps(pub, indent=2))
@@ -1926,7 +2001,7 @@ class Handler(BaseHTTPRequestHandler):
             <div class='codebox'><button type='button' class='copybtn' onclick="copyText('cfg-export', this)">Copy</button><pre id='cfg-export'>{html.escape(b64)}</pre></div>
             {qr_html}
             <h3 style='margin-top:16px'>Profile contents</h3><pre class='raw'>{pretty}</pre>
-            <p><a class='btn ghost' href='/configs'>Back to Config Manager</a></p></div>"""
+            <p><a class='btn ghost' href='/configs'>Back to SNI Manager</a></p></div>"""
             return self.send_html(page("Locked Config", body, active="/configs", user=user))
         if p == "/admins":
             creds = load_creds(); role = self.session_role()
@@ -2385,7 +2460,8 @@ class Handler(BaseHTTPRequestHandler):
                 log_activity(f"config profile added: {clean['name']} ({clean['protocol']} {clean['domain']}:{clean['port']})")
             save_profiles(profiles)
             run_config_sync()
-            return self.redirect("/configs")
+            saved_pid = str(clean.get("id") or pid)
+            return self.redirect("/configs?saved=" + urllib.parse.quote(saved_pid))
         if p == "/configs/toggle":
             profiles = load_profiles()
             rec = next((x for x in profiles if x.get("id") == str(data.get("id") or "")), None)

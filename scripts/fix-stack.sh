@@ -147,7 +147,7 @@ if [[ -n "$DOM_NOW" ]]; then
       echo "$_want" > /etc/haproxy/haproxy.cfg 2>/dev/null && ok "haproxy config re-rendered from the template" || warn "Could not rewrite the haproxy config"
     fi
   fi
-  # Config Manager maps must exist (empty is fine) before HAProxy starts.
+  # SNI Manager maps must exist (empty is fine) before HAProxy starts.
   _cm_dir="${CONFIG_DIR:-/etc/vps-manager}"
   mkdir -p "$_cm_dir" 2>/dev/null || true
   [[ -f "$_cm_dir/sni.map" ]] || : > "$_cm_dir/sni.map" 2>/dev/null || true

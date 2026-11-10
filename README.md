@@ -104,9 +104,10 @@ vpsmenu
 - **Activity / Audit Log** — every action with the admin name and the source IP
 - **Settings** — change domain (full re-provisioning, streamed live), SSL tools, SSH banner (HTML, max 2000 bytes), Ping QoS with per-user caps, panel password change
 
-## 🧩 Config Manager
+## 🧩 SNI Manager
 
-The **Config Manager** page in the panel manages ready-to-import connection
+The **SNI Manager** page in the panel (sidebar → SNI Manager, route
+`/configs`, alias `/sni-manager`) manages ready-to-import connection
 profiles for your own nodes (for example separate US / UK / DE servers):
 
 - **First-party profiles only.** A profile's domain must be the server's
@@ -116,14 +117,22 @@ profiles for your own nodes (for example separate US / UK / DE servers):
   free SNI field.
 - **Protocols:** SSH TLS, VMess, VLESS, Trojan, OpenVPN, SlowDNS, each
   with its normal port (443 / 443 / 443 / 443 / 1194 / 53). For SSH TLS
-  the payload is generated with `Host` set to the profile domain.
+  the payload is generated with `Host` set to the profile domain. Each
+  profile also carries the protocol's real connection path (`/sshws`,
+  `/vmess`, `/vless`, `/trojan`; OpenVPN / SlowDNS have none), included
+  in the export and in the API output.
+- **Storage.** Profiles live in the panel's existing JSON store
+  (`config-profiles.json` in the panel data dir) — there is no database
+  and no migration. Profiles saved before the `path` key existed load
+  unchanged, are treated as using their protocol's default path, and
+  gain the key the next time they are saved.
 - **Locked Config export.** Each profile can be exported as a base64
   code (with a QR code) that clients import directly. "Locked" means the
   profile carries no editable raw host field beyond your own domain.
   Base64 is an encoding, not encryption — share the code like a password.
 - **API.** `GET /api/configs` returns the active profiles as JSON. It
   requires the `X-Config-Token` header; the token is shown (and can be
-  regenerated) on the Config Manager page. Requests without the token
+  regenerated) on the SNI Manager page. Requests without the token
   get `401`.
 - **Sync.** Saving a profile runs `scripts/config-sync.sh`, which
   re-renders the HAProxy SNI map (`/etc/vps-manager/sni.map`) and the

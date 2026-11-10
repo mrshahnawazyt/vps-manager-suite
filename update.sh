@@ -94,9 +94,9 @@ mkdir -p "$SUITE_DIR"
 cp -a "$TMP/src/." "$SUITE_DIR/"
 chmod +x "$SUITE_DIR"/*.sh "$SUITE_DIR"/scripts/*.sh 2>/dev/null || true
 
-# Config Manager maps: create the (empty) map files so they always exist
+# SNI Manager maps: create the (empty) map files so they always exist
 # before HAProxy starts; scripts/config-sync.py fills them from the panel's
-# profiles. An install that predates the Config Manager gains them here.
+# profiles. An install that predates the SNI Manager gains them here.
 mkdir -p /etc/vps-manager 2>/dev/null || true
 [[ -f /etc/vps-manager/sni.map ]] || : > /etc/vps-manager/sni.map 2>/dev/null || true
 [[ -f /etc/vps-manager/nginx-profile-map.conf ]] || : > /etc/vps-manager/nginx-profile-map.conf 2>/dev/null || true
